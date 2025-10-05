@@ -1,0 +1,40 @@
+menu "OpenTherm Gateway Configuration"
+
+    config ESP_WIFI_SSID
+        string "WiFi SSID"
+        default "myssid"
+        help
+            SSID (network name) for the gateway to connect to.
+
+    config ESP_WIFI_PASSWORD
+        string "WiFi Password"
+        default "mypassword"
+        help
+            WiFi password (WPA or WPA2) for the gateway to use.
+
+    config OT_MASTER_IN_PIN
+        int "OpenTherm Master IN Pin (from thermostat)"
+        default 4
+        help
+            GPIO pin number for receiving data from thermostat.
+
+    config OT_MASTER_OUT_PIN
+        int "OpenTherm Master OUT Pin (to thermostat)"
+        default 5
+        help
+            GPIO pin number for sending data to thermostat.
+
+    config OT_SLAVE_IN_PIN
+        int "OpenTherm Slave IN Pin (from boiler)"
+        default 18
+        help
+            GPIO pin number for receiving data from boiler.
+
+    config OT_SLAVE_OUT_PIN
+        int "OpenTherm Slave OUT Pin (to boiler)"
+        default 19
+        help
+            GPIO pin number for sending data to boiler.
+
+endmenu
+
