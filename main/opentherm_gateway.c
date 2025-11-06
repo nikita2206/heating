@@ -14,6 +14,7 @@
 #include "esp_check.h"
 #include "esp_log.h"
 #include "esp_netif.h"
+#include "esp_timer.h"
 #include "esp_vfs_dev.h"
 #include "esp_vfs_usb_serial_jtag.h"
 #include "esp_vfs_eventfd.h"
@@ -135,7 +136,22 @@ static esp_err_t wifi_init_sta(void)
     }
 }
 
-/* OpenTherm message callback for logging */
+/**
+ * OpenTherm message callback - invoked for every captured frame
+ * 
+ * WHY: The gateway state machine calls this callback twice per transaction:
+ *   1. When a thermostat REQUEST is captured (from_role = OT_ROLE_MASTER)
+ *   2. When a boiler RESPONSE is captured (from_role = OT_ROLE_SLAVE)
+ * 
+ * This provides real-time telemetry of all OpenTherm communication, critical for:
+ *   - Debugging heating system issues
+ *   - Understanding communication patterns for future smart thermostat implementation
+ *   - Monitoring system health (temperatures, modulation levels, error codes)
+ * 
+ * WHAT: Parses the 32-bit OpenTherm frame and logs it to both:
+ *   - Serial console (ESP_LOGI)
+ *   - WebSocket clients (for remote monitoring via browser)
+ */
 static void opentherm_message_callback(OpenTherm *ot_instance, OpenThermMessage *message, OpenThermRole from_role)
 {
     const char *direction = (from_role == OT_ROLE_MASTER) ? "REQUEST" : "RESPONSE";
@@ -143,7 +159,7 @@ static void opentherm_message_callback(OpenTherm *ot_instance, OpenThermMessage 
     uint8_t data_id = opentherm_get_data_id(message->data);
     uint16_t data_value = opentherm_get_uint16(message->data);
     
-    // Log to console
+    // Log to serial console for debugging
     ESP_LOGI(TAG, "%s | Type: %s | ID: %d | Value: 0x%04X | Raw: 0x%08X",
              direction,
              opentherm_message_type_to_string(msg_type),
@@ -151,7 +167,7 @@ static void opentherm_message_callback(OpenTherm *ot_instance, OpenThermMessage 
              data_value,
              message->data);
     
-    // Send to WebSocket clients
+    // Send to WebSocket clients for remote monitoring
     websocket_server_send_opentherm_message(&ws_server,
                                             direction,
                                             message->data,
@@ -160,12 +176,22 @@ static void opentherm_message_callback(OpenTherm *ot_instance, OpenThermMessage 
                                             data_value);
 }
 
-/* OpenTherm gateway task - proxies messages between thermostat and boiler */
+/**
+ * OpenTherm gateway task - Main application task for MITM proxying
+ * 
+ * WHY: This task orchestrates the entire gateway operation:
+ *   1. Ensures network connectivity for remote monitoring
+ *   2. Drives the gateway state machine at high frequency (1ms loop)
+ *   3. Provides telemetry/diagnostics via WebSocket for debugging
+ * 
+ * The 1ms loop frequency is critical - it allows the state machine to respond
+ * quickly to frame completions and maintain OpenTherm timing requirements.
+ */
 static void opentherm_gateway_task(void *pvParameters)
 {
     ESP_LOGI(TAG, "Starting OpenTherm gateway task");
     
-    // Wait for WiFi connection
+    // Wait for WiFi connection before starting (needed for WebSocket logging)
     EventBits_t bits = xEventGroupWaitBits(s_wifi_event_group,
                                            WIFI_CONNECTED_BIT,
                                            pdFALSE,
@@ -178,7 +204,7 @@ static void opentherm_gateway_task(void *pvParameters)
         return;
     }
     
-    // Start WebSocket server
+    // Start WebSocket server for real-time message monitoring
     if (websocket_server_start(&ws_server) != ESP_OK) {
         ESP_LOGE(TAG, "Failed to start WebSocket server");
         vTaskDelete(NULL);
@@ -187,39 +213,114 @@ static void opentherm_gateway_task(void *pvParameters)
     
     ESP_LOGI(TAG, "WebSocket server started. Connect to http://<device-ip>/ to view messages");
     
-    // Initialize OpenTherm gateway
+    // Initialize OpenTherm gateway with dual interfaces
+    // Master side connects to thermostat, slave side connects to boiler
     opentherm_init_gateway(&ot,
                           OT_MASTER_IN_PIN, OT_MASTER_OUT_PIN,  // Thermostat side
                           OT_SLAVE_IN_PIN, OT_SLAVE_OUT_PIN);    // Boiler side
     
+    // Register callback for logging each captured frame (both directions)
     opentherm_set_message_callback(&ot, opentherm_message_callback, NULL);
     opentherm_start(&ot);
+    opentherm_gateway_reset(&ot);  // Start in clean IDLE state
     
     ESP_LOGI(TAG, "OpenTherm gateway initialized and ready");
     ESP_LOGI(TAG, "Thermostat side - IN: GPIO%d, OUT: GPIO%d", OT_MASTER_IN_PIN, OT_MASTER_OUT_PIN);
     ESP_LOGI(TAG, "Boiler side - IN: GPIO%d, OUT: GPIO%d", OT_SLAVE_IN_PIN, OT_SLAVE_OUT_PIN);
     
     OpenThermMessage request, response;
+    bool timeout_reported = false;
+    const TickType_t loop_delay = pdMS_TO_TICKS(1);  // 1ms - fast enough to handle OpenTherm timing
     
-    // Main gateway loop
+    // Heartbeat counter for periodic status messages (even when idle)
+    // WHY: Confirms WebSocket is alive and working during idle periods
+    uint32_t heartbeat_counter = 0;
+    const uint32_t HEARTBEAT_INTERVAL = 5000;  // Send status every 5 seconds (5000 * 1ms)
+    
+    // Debug counter for hardware diagnostics
+    // WHY: Helps diagnose hardware connection issues by showing ISR activity
+    uint32_t debug_counter = 0;
+    const uint32_t DEBUG_INTERVAL = 10000;  // Log debug info every 10 seconds (10000 * 1ms)
+    uint32_t last_master_edges = 0;
+    uint32_t last_slave_edges = 0;
+    
+    // Main gateway loop - drives the state machine continuously
+    // WHY 1ms loop: OpenTherm frames take ~34ms to transmit. A 1ms loop ensures
+    // we check for frame completion and state transitions frequently enough to
+    // meet the 800ms response timeout while keeping CPU usage reasonable.
     while (1) {
-        // Wait for request from thermostat (master)
-        if (opentherm_get_status(&ot) == OT_STATUS_READY) {
-            // In a real gateway implementation, we would:
-            // 1. Listen for incoming message from thermostat on master interface
-            // 2. Forward it to boiler on slave interface
-            // 3. Wait for response from boiler
-            // 4. Forward response back to thermostat
-            // 5. Log both request and response
+        // Process one state machine iteration
+        bool proxied = opentherm_gateway_process(&ot, &request, &response);
+
+        if (proxied) {
+            // Complete request->response transaction proxied
+            // Validate that response data ID matches request (OpenTherm requirement)
+            if (!opentherm_is_valid_response(request.data, response.data)) {
+                ESP_LOGW(TAG, "Gateway forwarded request 0x%08X but response ID mismatch (0x%08X)",
+                         request.data, response.data);
+                websocket_server_send_text(&ws_server,
+                                           "OT Gateway warning: response data ID mismatch");
+            } else {
+                ESP_LOGI(TAG, "Gateway proxied request 0x%08X -> response 0x%08X",
+                         request.data, response.data);
+            }
+        }
+
+        // Monitor and report timeout conditions to remote clients
+        // WHY: Timeouts indicate boiler communication issues that need investigation
+        if (ot.gateway_timeout_flag && !timeout_reported) {
+            timeout_reported = true;
+            ESP_LOGW(TAG, "Gateway timeout reported to websocket clients");
+            websocket_server_send_text(&ws_server,
+                                       "OT Gateway warning: boiler response timeout");
+        } else if (!ot.gateway_timeout_flag && timeout_reported) {
+            timeout_reported = false;
+        }
+
+        // Hardware diagnostics: log detailed state info periodically
+        // WHY: Helps debug hardware connection issues by showing if ISR is firing,
+        // what state the gateway is in, and which pins are active
+        debug_counter++;
+        if (debug_counter >= DEBUG_INTERVAL) {
+            debug_counter = 0;
+            uint32_t master_edges_delta = ot.isr_edge_count_master - last_master_edges;
+            uint32_t slave_edges_delta = ot.isr_edge_count_slave - last_slave_edges;
+            last_master_edges = ot.isr_edge_count_master;
+            last_slave_edges = ot.isr_edge_count_slave;
             
-            // For now, this is a simplified placeholder
-            // The actual implementation would need proper bi-directional proxying
-            // which requires more complex state machine handling
+            ESP_LOGI(TAG, "DEBUG: status=%d, state=%d, rx_pin=%d, rx_role=%d, bit_idx=%d",
+                     ot.status, ot.gateway_state, ot.current_receive_pin, 
+                     ot.current_receive_role, ot.response_bit_index);
+            ESP_LOGI(TAG, "DEBUG: ISR edges (last 10s): master=%lu (+%lu), slave=%lu (+%lu)",
+                     (unsigned long)ot.isr_edge_count_master, (unsigned long)master_edges_delta,
+                     (unsigned long)ot.isr_edge_count_slave, (unsigned long)slave_edges_delta);
             
-            ESP_LOGI(TAG, "Gateway ready - waiting for thermostat messages...");
+            // If no edges detected at all, alert about possible hardware issue
+            if (ot.isr_edge_count_master == 0 && ot.isr_edge_count_slave == 0) {
+                ESP_LOGW(TAG, "DEBUG: NO ISR ACTIVITY DETECTED - Check hardware connections!");
+                websocket_server_send_text(&ws_server,
+                    "WARNING: No GPIO activity detected on either interface. Check hardware!");
+            } else if (master_edges_delta == 0 && slave_edges_delta == 0) {
+                ESP_LOGW(TAG, "DEBUG: No new edges in last 10s - possible idle period or connection issue");
+            }
         }
         
-        vTaskDelay(pdMS_TO_TICKS(1000));
+        // Send periodic heartbeat/status messages to confirm WebSocket is alive
+        // WHY: When no OpenTherm traffic is happening (e.g., thermostat idle), clients
+        // need confirmation that the gateway and WebSocket connection are still working
+        heartbeat_counter++;
+        if (heartbeat_counter >= HEARTBEAT_INTERVAL) {
+            heartbeat_counter = 0;
+            char status_msg[128];
+            snprintf(status_msg, sizeof(status_msg),
+                     "Gateway status: %s | Uptime: %llu seconds",
+                     ot.gateway_timeout_flag ? "TIMEOUT" : "OK",
+                     (unsigned long long)(esp_timer_get_time() / 1000000));
+            websocket_server_send_text(&ws_server, status_msg);
+            ESP_LOGI(TAG, "Heartbeat sent: %s", status_msg);
+        }
+
+        vTaskDelay(loop_delay);
     }
     
     vTaskDelete(NULL);

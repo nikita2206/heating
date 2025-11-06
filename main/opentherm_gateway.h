@@ -14,14 +14,17 @@
 extern "C" {
 #endif
 
+// These pins are sort of reversed, the MASTER pins are for the board that acts as a master and that connects to the boiler, therefore MASTER pins are the pins that allow this program to act as a master.
+// The SLAVE pins are for the board that acts as a slave and that connects to the thermostat, therefore SLAVE pins are the pins that allow this program to act as a slave.
+
 // GPIO Configuration
 // Pins connected to thermostat (master side)
-#define OT_MASTER_IN_PIN    GPIO_NUM_4   // Receives from thermostat
-#define OT_MASTER_OUT_PIN   GPIO_NUM_5   // Sends to thermostat
+#define OT_MASTER_IN_PIN    GPIO_NUM_13  
+#define OT_MASTER_OUT_PIN   GPIO_NUM_14  
 
 // Pins connected to boiler (slave side)
-#define OT_SLAVE_IN_PIN     GPIO_NUM_18  // Receives from boiler
-#define OT_SLAVE_OUT_PIN    GPIO_NUM_19  // Sends to boiler
+#define OT_SLAVE_IN_PIN     GPIO_NUM_25 
+#define OT_SLAVE_OUT_PIN    GPIO_NUM_26
 
 // WiFi Configuration (update these with your credentials)
 #define WIFI_SSID      CONFIG_ESP_WIFI_SSID

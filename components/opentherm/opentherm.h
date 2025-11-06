@@ -37,7 +37,11 @@ typedef enum {
     OT_STATUS_RESPONSE_WAITING = 3,
     OT_STATUS_RESPONSE_READY = 4,
     OT_STATUS_RESPONSE_INVALID = 5,
-    OT_STATUS_TIMEOUT = 6
+    OT_STATUS_TIMEOUT = 6,
+    OT_STATUS_GATEWAY_REQUEST_WAITING = 7,
+    OT_STATUS_GATEWAY_REQUEST_READY = 8,
+    OT_STATUS_GATEWAY_RESPONSE_WAITING = 9,
+    OT_STATUS_GATEWAY_RESPONSE_READY = 10
 } OpenThermStatus;
 
 typedef enum {
@@ -45,12 +49,24 @@ typedef enum {
     OT_ROLE_SLAVE = 1    // Boiler side
 } OpenThermRole;
 
+typedef enum {
+    OT_GATEWAY_STATE_IDLE = 0,
+    OT_GATEWAY_STATE_WAITING_REQUEST,
+    OT_GATEWAY_STATE_WAITING_RESPONSE
+} OpenThermGatewayState;
+
 // OpenTherm message (32-bit)
 typedef struct {
     uint32_t data;
 } OpenThermMessage;
 
 typedef struct OpenTherm OpenTherm;
+
+typedef struct {
+    OpenTherm *ot;
+    gpio_num_t pin;
+    OpenThermRole role;
+} opentherm_isr_context_t;
 
 // Callback for handling received messages (used in gateway mode)
 typedef void (*opentherm_message_callback_t)(OpenTherm *ot, OpenThermMessage *message, OpenThermRole from_role);
@@ -70,6 +86,13 @@ struct OpenTherm {
     gpio_num_t in_pin_secondary;
     gpio_num_t out_pin_secondary;
     bool gateway_mode;
+    gpio_num_t current_receive_pin;
+    OpenThermRole current_receive_role;
+    OpenThermGatewayState gateway_state;
+    unsigned long gateway_timer_start;
+    OpenThermMessage gateway_request;
+    OpenThermMessage gateway_response;
+    bool gateway_timeout_flag;
     
     // Message callback for logging/processing
     opentherm_message_callback_t message_callback;
@@ -78,6 +101,14 @@ struct OpenTherm {
     // Timing
     int bit_read_state;
     unsigned long response_start_time;
+
+    // ISR contexts
+    opentherm_isr_context_t isr_primary_ctx;
+    opentherm_isr_context_t isr_secondary_ctx;
+    
+    // Debug counters - track ISR activity for hardware diagnostics
+    volatile uint32_t isr_edge_count_master;  // Count edges on master interface
+    volatile uint32_t isr_edge_count_slave;   // Count edges on slave interface
 };
 
 // Initialization
@@ -87,6 +118,8 @@ void opentherm_init_gateway(OpenTherm *ot,
                             gpio_num_t in_pin_slave, gpio_num_t out_pin_slave);
 void opentherm_set_message_callback(OpenTherm *ot, opentherm_message_callback_t callback, void *user_data);
 void opentherm_start(OpenTherm *ot);
+void opentherm_gateway_reset(OpenTherm *ot);
+bool opentherm_gateway_process(OpenTherm *ot, OpenThermMessage *request, OpenThermMessage *response);
 
 // Message handling
 bool opentherm_send_request(OpenTherm *ot, OpenThermMessage *request);

@@ -25,6 +25,7 @@ static const char *html_page =
     ".msg{padding:5px;margin:2px 0;border-left:3px solid #4CAF50;background:white;border-radius:2px}"
     ".msg.request{border-left-color:#2196F3}"
     ".msg.response{border-left-color:#FF9800}"
+    ".msg.status{border-left-color:#9C27B0;background:#f3e5f5}"
     ".timestamp{color:#666;font-size:11px}"
     ".controls{margin:15px 0}"
     "button{padding:8px 16px;margin:5px;border:none;border-radius:4px;cursor:pointer;font-size:14px}"
@@ -46,11 +47,17 @@ static const char *html_page =
     "ws.onopen=()=>{status.textContent='Connected';status.className='status connected'};"
     "ws.onclose=()=>{status.textContent='Disconnected';status.className='status disconnected';setTimeout(connect,2000)};"
     "ws.onmessage=(e)=>{"
-    "let data=JSON.parse(e.data);"
     "let div=document.createElement('div');"
+    "let ts=new Date().toLocaleTimeString();"
+    "try{"
+    "let data=JSON.parse(e.data);"
     "div.className='msg '+data.direction.toLowerCase();"
-    "let ts=new Date(data.timestamp).toLocaleTimeString();"
+    "ts=new Date(data.timestamp).toLocaleTimeString();"
     "div.innerHTML='<span class=\"timestamp\">['+ts+']</span> <strong>'+data.direction+'</strong> '+data.msg_type+' | ID:'+data.data_id+' | Value:'+data.data_value+' (0x'+data.message.toString(16).toUpperCase()+')';"
+    "}catch(err){"
+    "div.className='msg status';"
+    "div.innerHTML='<span class=\"timestamp\">['+ts+']</span> <strong>STATUS:</strong> '+e.data;"
+    "}"
     "msgs.appendChild(div);msgs.scrollTop=msgs.scrollHeight;"
     "}}"
     "function clearMessages(){msgs.innerHTML='';}"
@@ -69,6 +76,15 @@ static esp_err_t ws_handler(httpd_req_t *req)
 {
     if (req->method == HTTP_GET) {
         ESP_LOGI(TAG, "WebSocket handshake");
+        
+        // Store client file descriptor immediately after handshake
+        websocket_server_t *ws_server = (websocket_server_t *)req->user_ctx;
+        if (ws_server) {
+            ws_server->client_fd = httpd_req_to_sockfd(req);
+            ws_server->client_connected = true;
+            ESP_LOGI(TAG, "WebSocket client connected, fd=%d", ws_server->client_fd);
+        }
+        
         return ESP_OK;
     }
     
@@ -83,14 +99,6 @@ static esp_err_t ws_handler(httpd_req_t *req)
     }
     
     ESP_LOGI(TAG, "WebSocket frame received, len=%d", ws_pkt.len);
-    
-    // Store client file descriptor for later use
-    websocket_server_t *ws_server = (websocket_server_t *)req->user_ctx;
-    if (ws_server) {
-        ws_server->client_fd = httpd_req_to_sockfd(req);
-        ws_server->client_connected = true;
-        ESP_LOGI(TAG, "WebSocket client connected, fd=%d", ws_server->client_fd);
-    }
     
     return ESP_OK;
 }
@@ -148,6 +156,7 @@ void websocket_server_stop(websocket_server_t *ws_server)
 esp_err_t websocket_server_send_text(websocket_server_t *ws_server, const char *text)
 {
     if (!ws_server->server || !ws_server->client_connected) {
+        ESP_LOGI(TAG, "Not sending WebSocket message: server not started or client not connected");
         return ESP_FAIL;
     }
     
@@ -161,6 +170,8 @@ esp_err_t websocket_server_send_text(websocket_server_t *ws_server, const char *
     if (ret != ESP_OK) {
         ESP_LOGW(TAG, "Failed to send WebSocket message: %s", esp_err_to_name(ret));
         ws_server->client_connected = false;
+    } else {
+        ESP_LOGI(TAG, "WebSocket message sent: %s", text);
     }
     
     return ret;
