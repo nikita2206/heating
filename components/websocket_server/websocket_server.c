@@ -156,7 +156,7 @@ void websocket_server_stop(websocket_server_t *ws_server)
 esp_err_t websocket_server_send_text(websocket_server_t *ws_server, const char *text)
 {
     if (!ws_server->server || !ws_server->client_connected) {
-        ESP_LOGI(TAG, "Not sending WebSocket message: server not started or client not connected");
+        ESP_LOGD(TAG, "Not sending WebSocket message: server not started or client not connected");
         return ESP_FAIL;
     }
     

@@ -35,13 +35,19 @@ typedef enum {
     OT_STATUS_READY = 1,
     OT_STATUS_REQUEST_SENDING = 2,
     OT_STATUS_RESPONSE_WAITING = 3,
-    OT_STATUS_RESPONSE_READY = 4,
-    OT_STATUS_RESPONSE_INVALID = 5,
-    OT_STATUS_TIMEOUT = 6,
-    OT_STATUS_GATEWAY_REQUEST_WAITING = 7,
-    OT_STATUS_GATEWAY_REQUEST_READY = 8,
-    OT_STATUS_GATEWAY_RESPONSE_WAITING = 9,
-    OT_STATUS_GATEWAY_RESPONSE_READY = 10
+    OT_STATUS_RESPONSE_START_BIT = 4,
+    OT_STATUS_RESPONSE_RECEIVING = 5,
+    OT_STATUS_RESPONSE_READY = 6,
+    OT_STATUS_RESPONSE_INVALID = 7,
+    OT_STATUS_TIMEOUT = 8,
+    OT_STATUS_GATEWAY_REQUEST_WAITING = 9,
+    OT_STATUS_GATEWAY_REQUEST_START_BIT = 10,
+    OT_STATUS_GATEWAY_REQUEST_RECEIVING = 11,
+    OT_STATUS_GATEWAY_REQUEST_READY = 12,
+    OT_STATUS_GATEWAY_RESPONSE_WAITING = 13,
+    OT_STATUS_GATEWAY_RESPONSE_START_BIT = 14,
+    OT_STATUS_GATEWAY_RESPONSE_RECEIVING = 15,
+    OT_STATUS_GATEWAY_RESPONSE_READY = 16
 } OpenThermStatus;
 
 typedef enum {
@@ -67,6 +73,19 @@ typedef struct {
     gpio_num_t pin;
     OpenThermRole role;
 } opentherm_isr_context_t;
+
+// ISR debug ring buffer entry (no strings, just raw data)
+typedef struct {
+    unsigned long timestamp;
+    uint8_t event_type;  // 0=edge, 1=sample, 2=state_change
+    uint8_t pin_level;
+    uint8_t status;
+    uint8_t bit_index;
+    uint32_t response;
+    uint32_t elapsed;
+} opentherm_isr_debug_entry_t;
+
+#define OT_ISR_DEBUG_BUFFER_SIZE 256  // Enough for multiple full frames
 
 // Callback for handling received messages (used in gateway mode)
 typedef void (*opentherm_message_callback_t)(OpenTherm *ot, OpenThermMessage *message, OpenThermRole from_role);
@@ -98,9 +117,7 @@ struct OpenTherm {
     opentherm_message_callback_t message_callback;
     void *user_data;
     
-    // Timing
-    int bit_read_state;
-    unsigned long response_start_time;
+    // Timing - ISR frame reception (timestamp tracks last significant edge)
 
     // ISR contexts
     opentherm_isr_context_t isr_primary_ctx;
@@ -109,6 +126,12 @@ struct OpenTherm {
     // Debug counters - track ISR activity for hardware diagnostics
     volatile uint32_t isr_edge_count_master;  // Count edges on master interface
     volatile uint32_t isr_edge_count_slave;   // Count edges on slave interface
+    
+    // ISR debug ring buffer
+    opentherm_isr_debug_entry_t isr_debug_buffer[OT_ISR_DEBUG_BUFFER_SIZE];
+    volatile uint32_t isr_debug_write_idx;
+    volatile uint32_t isr_debug_read_idx;
+    bool isr_debug_enabled;
 };
 
 // Initialization
@@ -141,6 +164,10 @@ int8_t opentherm_get_int8(uint32_t message);
 bool opentherm_is_valid_response(uint32_t request, uint32_t response);
 const char* opentherm_message_type_to_string(OpenThermMessageType type);
 const char* opentherm_status_to_string(OpenThermStatus status);
+
+// ISR debug functions
+void opentherm_isr_debug_enable(OpenTherm *ot, bool enable);
+void opentherm_isr_debug_flush(OpenTherm *ot);
 
 // Data ID constants (commonly used)
 #define OT_MSGID_STATUS 0

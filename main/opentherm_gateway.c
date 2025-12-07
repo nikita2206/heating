@@ -224,6 +224,9 @@ static void opentherm_gateway_task(void *pvParameters)
     opentherm_start(&ot);
     opentherm_gateway_reset(&ot);  // Start in clean IDLE state
     
+    // Enable/disable ISR debug logging (logs first 8 bits of each message to ring buffer)
+    opentherm_isr_debug_enable(&ot, false);
+    
     ESP_LOGI(TAG, "OpenTherm gateway initialized and ready");
     ESP_LOGI(TAG, "Thermostat side - IN: GPIO%d, OUT: GPIO%d", OT_MASTER_IN_PIN, OT_MASTER_OUT_PIN);
     ESP_LOGI(TAG, "Boiler side - IN: GPIO%d, OUT: GPIO%d", OT_SLAVE_IN_PIN, OT_SLAVE_OUT_PIN);
@@ -249,6 +252,9 @@ static void opentherm_gateway_task(void *pvParameters)
     // we check for frame completion and state transitions frequently enough to
     // meet the 800ms response timeout while keeping CPU usage reasonable.
     while (1) {
+        // Flush ISR debug buffer to logs (does nothing if debug is disabled)
+        opentherm_isr_debug_flush(&ot);
+        
         // Process one state machine iteration
         bool proxied = opentherm_gateway_process(&ot, &request, &response);
 
@@ -317,7 +323,6 @@ static void opentherm_gateway_task(void *pvParameters)
                      ot.gateway_timeout_flag ? "TIMEOUT" : "OK",
                      (unsigned long long)(esp_timer_get_time() / 1000000));
             websocket_server_send_text(&ws_server, status_msg);
-            ESP_LOGI(TAG, "Heartbeat sent: %s", status_msg);
         }
 
         vTaskDelay(loop_delay);

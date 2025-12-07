@@ -8,6 +8,7 @@
 #include "esp_err.h"
 #include "esp_timer.h"
 #include "driver/gpio.h"
+#include "hal/gpio_ll.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include <string.h>
@@ -17,6 +18,7 @@ static const char *TAG = "OpenTherm";
 // OpenTherm timing constants (in microseconds)
 #define OT_TIMING_BIT_PERIOD 1000
 #define OT_TIMING_BIT_HALF_PERIOD 500
+#define OT_TIMING_ISR_BIT_THRESHOLD 750  // ISR threshold: edges >750µs apart = new bit
 #define OT_TIMING_RESPONSE_TIMEOUT 800000  // 800ms
 #define OT_TIMING_GATEWAY_REQUEST_TIMEOUT 1500000  // 1.5s wait for thermostat frame
 
@@ -29,20 +31,49 @@ static inline unsigned long IRAM_ATTR micros(void)
 static void opentherm_disable_all_inputs(OpenTherm *ot);
 static void opentherm_prepare_receive(OpenTherm *ot, OpenThermRole role);
 
+// Fast ISR debug buffer write (no formatting, just store raw values)
+static inline void IRAM_ATTR opentherm_isr_debug_log(OpenTherm *ot, uint8_t event_type, 
+                                                       unsigned long timestamp, uint8_t pin_level,
+                                                       uint8_t status, uint8_t bit_index,
+                                                       uint32_t response, uint32_t elapsed)
+{
+    if (!ot->isr_debug_enabled) {
+        return;
+    }
+    
+    uint32_t write_idx = ot->isr_debug_write_idx;
+    uint32_t next_idx = (write_idx + 1) % OT_ISR_DEBUG_BUFFER_SIZE;
+    
+    // Only write if buffer not full (simple check, may lose entries if reader is slow)
+    if (next_idx != ot->isr_debug_read_idx) {
+        opentherm_isr_debug_entry_t *entry = &ot->isr_debug_buffer[write_idx];
+        entry->timestamp = timestamp;
+        entry->event_type = event_type;
+        entry->pin_level = pin_level;
+        entry->status = status;
+        entry->bit_index = bit_index;
+        entry->response = response;
+        entry->elapsed = elapsed;
+        
+        ot->isr_debug_write_idx = next_idx;
+    }
+}
+
 /**
  * GPIO interrupt handler - decodes Manchester-encoded OpenTherm frames
  * 
  * WHY: OpenTherm uses Manchester encoding at 1kHz bit rate (1ms per bit).
- * Manchester encoding has two transitions per bit period:
- *   - Logic 1: low-to-high transition in middle of bit period
- *   - Logic 0: high-to-low transition in middle of bit period
- * We must capture every edge and decode the timing to reconstruct the 32-bit frame.
+ * Manchester encoding guarantees a transition at mid-bit (~500µs) for each bit,
+ * and creates an additional transition at bit boundaries (~1000µs) when consecutive
+ * bits differ. By measuring edge-to-edge timing, we can reliably decode bits:
+ *   - Edges <750µs apart = mid-bit transition (ignore)
+ *   - Edges >750µs apart = new bit period (sample pin state)
  * 
  * WHAT: This ISR fires on ANY edge (rising or falling) of the selected input pin.
- * It uses timing between edges to determine bit values:
- *   1. First edge of frame = start bit
- *   2. Next 64 edges = 32 data bits (2 edges per bit in Manchester encoding)
- *   3. Final edges = stop bit
+ * Uses a 750µs threshold to distinguish mid-bit transitions from new bit periods:
+ *   1. First edge = start bit
+ *   2. Each edge >750µs after previous = sample new bit (read GPIO level)
+ *   3. Continue until 32 data bits captured
  * 
  * Frame structure: [start bit] [32 data bits] [stop bit]
  * Total frame time: ~34ms (34 bits × 1ms each)
@@ -66,13 +97,13 @@ static void IRAM_ATTR opentherm_isr_handler(void *arg)
 
     // WHY: Only process interrupts when we're actively waiting for this specific
     // pin/role. Prevents cross-talk between master and slave interfaces.
-    if (status == OT_STATUS_RESPONSE_WAITING) {
+    if (status == OT_STATUS_RESPONSE_WAITING || status == OT_STATUS_RESPONSE_START_BIT || status == OT_STATUS_RESPONSE_RECEIVING) {
         // Legacy non-gateway mode
         should_process = true;
     } else if (ot->gateway_mode) {
         // Gateway mode: check if this interrupt is from the pin we're currently listening to
-        if ((status == OT_STATUS_GATEWAY_REQUEST_WAITING && ctx->role == OT_ROLE_MASTER) ||
-            (status == OT_STATUS_GATEWAY_RESPONSE_WAITING && ctx->role == OT_ROLE_SLAVE)) {
+        if (((status == OT_STATUS_GATEWAY_REQUEST_WAITING || status == OT_STATUS_GATEWAY_REQUEST_START_BIT || status == OT_STATUS_GATEWAY_REQUEST_RECEIVING) && ctx->role == OT_ROLE_MASTER) ||
+            ((status == OT_STATUS_GATEWAY_RESPONSE_WAITING || status == OT_STATUS_GATEWAY_RESPONSE_START_BIT || status == OT_STATUS_GATEWAY_RESPONSE_RECEIVING) && ctx->role == OT_ROLE_SLAVE)) {
             if (ot->current_receive_pin == ctx->pin) {
                 should_process = true;
             }
@@ -91,59 +122,103 @@ static void IRAM_ATTR opentherm_isr_handler(void *arg)
     }
 
     unsigned long current_time = micros();
+    int pin_level = gpio_ll_get_level(GPIO_LL_GET_HW(GPIO_PORT_0), ctx->pin);
 
-    if (ot->response_bit_index == 0) {
-        // Start bit detected - begin frame capture
-        ot->response_start_time = current_time;
-        ot->response_bit_index = 1;
-        ot->bit_read_state = 0;
-    } else {
-        // Calculate which bit period we're in based on elapsed time
-        unsigned long elapsed = current_time - ot->response_start_time;
-        uint8_t bit_index = (uint8_t)((elapsed - OT_TIMING_BIT_HALF_PERIOD) / OT_TIMING_BIT_PERIOD);
-
-        if (bit_index < 32) {
-            // WHY: Manchester encoding has TWO edges per bit. We track which edge
-            // we're on with bit_read_state. The timing between edges determines bit value.
-            if (ot->bit_read_state == 0) {
-                // First edge of this bit period - just mark that we saw it
-                ot->bit_read_state = 1;
-            } else {
-                // Second edge of this bit period - decode the bit value
-                // If this edge came early in the half-period, bit is 1; if late, bit is 0
-                bool bit_value = (elapsed - (bit_index * OT_TIMING_BIT_PERIOD + OT_TIMING_BIT_HALF_PERIOD)) < OT_TIMING_BIT_HALF_PERIOD;
-                ot->response = (ot->response << 1) | (bit_value ? 1 : 0);
-                ot->bit_read_state = 0;
-                ot->response_bit_index++;
-            }
-        } else if (bit_index >= 32) {
-            // All 32 data bits captured (stop bit or beyond) - frame complete
+    // State machine for Manchester decoding (adapted from ihormelnyk/opentherm_library)
+    // States: WAITING -> START_BIT -> RECEIVING -> READY
+    
+    // State: WAITING - looking for start bit (HIGH edge)
+    if (status == OT_STATUS_RESPONSE_WAITING || status == OT_STATUS_GATEWAY_REQUEST_WAITING || status == OT_STATUS_GATEWAY_RESPONSE_WAITING) {
+        if (pin_level == 1) {
+            // Detected HIGH - start bit beginning
             if (status == OT_STATUS_RESPONSE_WAITING) {
-                ot->status = OT_STATUS_RESPONSE_READY;
+                ot->status = OT_STATUS_RESPONSE_START_BIT;
             } else if (status == OT_STATUS_GATEWAY_REQUEST_WAITING) {
-                ot->status = OT_STATUS_GATEWAY_REQUEST_READY;
-            } else if (status == OT_STATUS_GATEWAY_RESPONSE_WAITING) {
-                ot->status = OT_STATUS_GATEWAY_RESPONSE_READY;
+                ot->status = OT_STATUS_GATEWAY_REQUEST_START_BIT;
+            } else {
+                ot->status = OT_STATUS_GATEWAY_RESPONSE_START_BIT;
             }
             ot->response_timestamp = current_time;
+        } else {
+            // Invalid - frame must start with HIGH
+            ot->status = OT_STATUS_RESPONSE_INVALID;
+            ot->response_timestamp = current_time;
+        }
+    }
+    // State: START_BIT - looking for LOW transition <750µs after HIGH
+    else if (status == OT_STATUS_RESPONSE_START_BIT || status == OT_STATUS_GATEWAY_REQUEST_START_BIT || status == OT_STATUS_GATEWAY_RESPONSE_START_BIT) {
+        if ((current_time - ot->response_timestamp < OT_TIMING_ISR_BIT_THRESHOLD) && pin_level == 0) {
+            // Valid start bit (HIGH->LOW within 750µs) - begin receiving data
+            if (status == OT_STATUS_RESPONSE_START_BIT) {
+                ot->status = OT_STATUS_RESPONSE_RECEIVING;
+            } else if (status == OT_STATUS_GATEWAY_REQUEST_START_BIT) {
+                ot->status = OT_STATUS_GATEWAY_REQUEST_RECEIVING;
+            } else {
+                ot->status = OT_STATUS_GATEWAY_RESPONSE_RECEIVING;
+            }
+            ot->response_timestamp = current_time;
+            ot->response_bit_index = 0;
+            ot->response = 0;
+        } else if (current_time - ot->response_timestamp >= OT_TIMING_ISR_BIT_THRESHOLD) {
+            // Timeout - didn't see LOW edge in time
+            ot->status = OT_STATUS_RESPONSE_INVALID;
+            ot->response_timestamp = current_time;
+        }
+    }
+    // State: RECEIVING - collecting 32 data bits
+    else if (status == OT_STATUS_RESPONSE_RECEIVING || status == OT_STATUS_GATEWAY_REQUEST_RECEIVING || status == OT_STATUS_GATEWAY_RESPONSE_RECEIVING) {
+        unsigned long elapsed = current_time - ot->response_timestamp;
+        
+        // Debug: Log edge arrival (event_type=0) - log ALL bits to diagnose issue
+        opentherm_isr_debug_log(ot, 0, current_time, pin_level, status, 
+                                ot->response_bit_index, ot->response, elapsed);
+        
+        if (elapsed > OT_TIMING_ISR_BIT_THRESHOLD) {
+            if (ot->response_bit_index < 32) {
+                // Sample data bit: Invert pin reading to match working library
+                // Pin LOW → Bit 1, Pin HIGH → Bit 0
+                bool bit_value = (pin_level == 0);
+                ot->response = (ot->response << 1) | (bit_value ? 1 : 0);
+                
+                // Debug: Log sample (event_type=1) - log ALL bits
+                opentherm_isr_debug_log(ot, 1, current_time, pin_level, status,
+                                        ot->response_bit_index, ot->response, elapsed);
+                
+                ot->response_timestamp = current_time;
+                ot->response_bit_index++;
+            } else {
+                // 32 bits collected - frame complete (current edge is stop bit)
+                if (status == OT_STATUS_RESPONSE_RECEIVING) {
+                    ot->status = OT_STATUS_RESPONSE_READY;
+                } else if (status == OT_STATUS_GATEWAY_REQUEST_RECEIVING) {
+                    ot->status = OT_STATUS_GATEWAY_REQUEST_READY;
+                } else {
+                    ot->status = OT_STATUS_GATEWAY_RESPONSE_READY;
+                }
+                ot->response_timestamp = current_time;
+                
+                // Debug: Log completion (event_type=2)
+                opentherm_isr_debug_log(ot, 2, current_time, pin_level, ot->status,
+                                        32, ot->response, elapsed);
+            }
         }
     }
 }
 
-// Send bit using Manchester encoding
+// Send bit using Manchester encoding (matched to working library)
 static void opentherm_send_bit(OpenTherm *ot, bool high, gpio_num_t pin)
 {
     if (high) {
-        // Manchester high: low then high
-        gpio_set_level(pin, 1);
+        // Manchester 1: active (LOW) then idle (HIGH)
+        gpio_set_level(pin, 0);  // Active = LOW
         esp_rom_delay_us(OT_TIMING_BIT_HALF_PERIOD);
-        gpio_set_level(pin, 0);
+        gpio_set_level(pin, 1);  // Idle = HIGH
         esp_rom_delay_us(OT_TIMING_BIT_HALF_PERIOD);
     } else {
-        // Manchester low: high then low
-        gpio_set_level(pin, 0);
+        // Manchester 0: idle (HIGH) then active (LOW)
+        gpio_set_level(pin, 1);  // Idle = HIGH
         esp_rom_delay_us(OT_TIMING_BIT_HALF_PERIOD);
-        gpio_set_level(pin, 1);
+        gpio_set_level(pin, 0);  // Active = LOW
         esp_rom_delay_us(OT_TIMING_BIT_HALF_PERIOD);
     }
 }
@@ -173,7 +248,7 @@ void opentherm_init(OpenTherm *ot, gpio_num_t in_pin, gpio_num_t out_pin, OpenTh
     ot->isr_secondary_ctx.pin = GPIO_NUM_NC;
     ot->isr_secondary_ctx.role = OT_ROLE_SLAVE;
     
-    // Configure input pin
+    // Configure input pin with strong pull-up for fast edges
     gpio_config_t in_conf = {
         .pin_bit_mask = (1ULL << in_pin),
         .mode = GPIO_MODE_INPUT,
@@ -362,8 +437,7 @@ static void opentherm_prepare_receive(OpenTherm *ot, OpenThermRole role)
     // Clear frame reception state for new capture
     ot->response = 0;
     ot->response_bit_index = 0;
-    ot->bit_read_state = 0;
-    ot->response_start_time = 0;
+    ot->response_timestamp = 0;
     ot->current_receive_role = role;
     ot->current_receive_pin = (role == OT_ROLE_MASTER) ? ot->in_pin : ot->in_pin_secondary;
 
@@ -686,14 +760,54 @@ const char* opentherm_status_to_string(OpenThermStatus status)
         case OT_STATUS_READY: return "READY";
         case OT_STATUS_REQUEST_SENDING: return "REQUEST_SENDING";
         case OT_STATUS_RESPONSE_WAITING: return "RESPONSE_WAITING";
+        case OT_STATUS_RESPONSE_START_BIT: return "RESPONSE_START_BIT";
+        case OT_STATUS_RESPONSE_RECEIVING: return "RESPONSE_RECEIVING";
         case OT_STATUS_RESPONSE_READY: return "RESPONSE_READY";
         case OT_STATUS_RESPONSE_INVALID: return "RESPONSE_INVALID";
         case OT_STATUS_TIMEOUT: return "TIMEOUT";
         case OT_STATUS_GATEWAY_REQUEST_WAITING: return "GATEWAY_REQUEST_WAITING";
+        case OT_STATUS_GATEWAY_REQUEST_START_BIT: return "GATEWAY_REQUEST_START_BIT";
+        case OT_STATUS_GATEWAY_REQUEST_RECEIVING: return "GATEWAY_REQUEST_RECEIVING";
         case OT_STATUS_GATEWAY_REQUEST_READY: return "GATEWAY_REQUEST_READY";
         case OT_STATUS_GATEWAY_RESPONSE_WAITING: return "GATEWAY_RESPONSE_WAITING";
+        case OT_STATUS_GATEWAY_RESPONSE_START_BIT: return "GATEWAY_RESPONSE_START_BIT";
+        case OT_STATUS_GATEWAY_RESPONSE_RECEIVING: return "GATEWAY_RESPONSE_RECEIVING";
         case OT_STATUS_GATEWAY_RESPONSE_READY: return "GATEWAY_RESPONSE_READY";
         default: return "UNKNOWN";
+    }
+}
+
+// Enable/disable ISR debug logging to ring buffer
+void opentherm_isr_debug_enable(OpenTherm *ot, bool enable)
+{
+    ot->isr_debug_enabled = enable;
+    if (enable) {
+        // Clear buffer on enable
+        ot->isr_debug_write_idx = 0;
+        ot->isr_debug_read_idx = 0;
+    }
+}
+
+// Flush ISR debug buffer to ESP_LOGI (call from main loop, not ISR!)
+void opentherm_isr_debug_flush(OpenTherm *ot)
+{
+    while (ot->isr_debug_read_idx != ot->isr_debug_write_idx) {
+        uint32_t read_idx = ot->isr_debug_read_idx;
+        opentherm_isr_debug_entry_t *entry = &ot->isr_debug_buffer[read_idx];
+        
+        const char *event_str;
+        switch (entry->event_type) {
+            case 0: event_str = "Edge"; break;
+            case 1: event_str = "SAMPLE"; break;
+            case 2: event_str = "COMPLETE"; break;
+            default: event_str = "?"; break;
+        }
+        
+        ESP_LOGI(TAG, "ISR[%lu]: %s bit=%d pin=%d elapsed=%luµs resp=0x%lX status=%d",
+                 entry->timestamp, event_str, entry->bit_index, entry->pin_level,
+                 entry->elapsed, entry->response, entry->status);
+        
+        ot->isr_debug_read_idx = (read_idx + 1) % OT_ISR_DEBUG_BUFFER_SIZE;
     }
 }
 
