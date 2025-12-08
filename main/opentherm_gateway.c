@@ -246,9 +246,9 @@ static void opentherm_gateway_task(void *pvParameters)
     opentherm_rmt_set_message_callback(&ot, opentherm_message_callback, NULL);
     
     // Initialize boiler manager for diagnostic injection
-    // Intercept 1 out of every 10 ID=0 frames (configurable)
+    // Intercept 1 out of every 4 ID=0 frames (configurable)
     // This allows most status queries to pass through while still collecting diagnostics
-    uint32_t intercept_rate = 10;  // Can be made configurable via menuconfig or runtime setting
+    uint32_t intercept_rate = 4;  // Can be made configurable via menuconfig or runtime setting
     if (boiler_manager_init(&boiler_mgr, BOILER_MANAGER_MODE_PROXY, &ot, intercept_rate) != ESP_OK) {
         ESP_LOGE(TAG, "Failed to initialize boiler manager");
         vTaskDelete(NULL);
