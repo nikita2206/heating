@@ -214,15 +214,12 @@ static bool decode_manchester_symbols(const rmt_symbol_word_t *symbols, size_t s
         return false;
     }
     
-    // Log what we received for debugging
-    ESP_LOGI(TAG, "Decode: received %d symbols", symbol_count);
+    // Log symbol count (detailed symbols only at DEBUG level)
+    ESP_LOGD(TAG, "Decode: received %d symbols", symbol_count);
     for (size_t i = 0; i < symbol_count && i < 40; i++) {
-        ESP_LOGI(TAG, "  [%d] l0=%d d0=%d, l1=%d d1=%d", 
+        ESP_LOGD(TAG, "  [%d] l0=%d d0=%d, l1=%d d1=%d", 
                  i, symbols[i].level0, symbols[i].duration0,
                  symbols[i].level1, symbols[i].duration1);
-    }
-    if (symbol_count > 40) {
-        ESP_LOGI(TAG, "  ... (%d more symbols)", symbol_count - 40);
     }
     
     // Flatten symbols into array of half-bit levels
@@ -304,17 +301,17 @@ static bool decode_manchester_symbols(const rmt_symbol_word_t *symbols, size_t s
         }
     }
     
-    ESP_LOGI(TAG, "Decode: extracted %d bits, frame=0x%08lX", bit_count, (unsigned long)decoded);
+    ESP_LOGD(TAG, "Decode: extracted %d bits, frame=0x%08lX", bit_count, (unsigned long)decoded);
     
     if (bit_count != 32) {
-        ESP_LOGW(TAG, "Decode: incomplete frame, got %d bits (expected 32)", bit_count);
+        ESP_LOGD(TAG, "Decode: incomplete frame, got %d bits (expected 32)", bit_count);
         return false;
     }
     
     *frame = decoded;
     *parity_ok = opentherm_rmt_check_parity(decoded);
     
-    ESP_LOGI(TAG, "Decode: frame=0x%08lX parity=%s", (unsigned long)decoded, *parity_ok ? "OK" : "BAD");
+    ESP_LOGD(TAG, "Decode: frame=0x%08lX parity=%s", (unsigned long)decoded, *parity_ok ? "OK" : "BAD");
     return true;
 }
 

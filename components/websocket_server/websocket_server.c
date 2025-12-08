@@ -193,6 +193,10 @@ esp_err_t websocket_server_start(websocket_server_t *ws_server)
     config.max_open_sockets = 7;
     config.max_uri_handlers = 16;  // Increased for OTA handlers
     config.uri_match_fn = httpd_uri_match_wildcard;
+    config.recv_wait_timeout = 30;  // 30 seconds - needed for OTA uploads
+    config.send_wait_timeout = 30;  // 30 seconds
+    config.stack_size = 8192;       // Larger stack for OTA operations
+    config.lru_purge_enable = true; // Allow purging idle connections
     
     ESP_LOGI(TAG, "Starting WebSocket server on port %d", config.server_port);
     

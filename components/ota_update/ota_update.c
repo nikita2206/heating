@@ -116,28 +116,30 @@ static const char *ota_page =
     "<div class='status-msg' id='status-msg'></div>"
     "</div></div></div>"
     "<script>"
-    "let zone=document.getElementById('upload-zone');"
+    "let zone=document.getElementById('upload-zone'),uploading=false,statusInterval=null;"
     "zone.addEventListener('dragover',e=>{e.preventDefault();zone.classList.add('dragover')});"
     "zone.addEventListener('dragleave',()=>zone.classList.remove('dragover'));"
     "zone.addEventListener('drop',e=>{e.preventDefault();zone.classList.remove('dragover');if(e.dataTransfer.files.length)handleFile(e.dataTransfer.files[0])});"
     "function handleFile(file){if(!file||!file.name.endsWith('.bin')){showStatus('Please select a .bin file','error');return;}"
     "if(file.size>1800000){showStatus('File too large for partition','error');return;}"
     "uploadFirmware(file);}"
-    "function uploadFirmware(file){let xhr=new XMLHttpRequest();let progress=document.getElementById('progress-container');"
+    "function uploadFirmware(file){if(uploading)return;uploading=true;"
+    "if(statusInterval){clearInterval(statusInterval);statusInterval=null;}"
+    "let xhr=new XMLHttpRequest();let progress=document.getElementById('progress-container');"
     "let fill=document.getElementById('progress-fill');let text=document.getElementById('progress-text');"
     "progress.style.display='block';zone.classList.add('uploading');hideStatus();"
     "xhr.upload.onprogress=e=>{if(e.lengthComputable){let pct=Math.round(e.loaded/e.total*100);fill.style.width=pct+'%%';text.textContent='Uploading... '+pct+'%%';}};"
-    "xhr.onload=()=>{zone.classList.remove('uploading');"
+    "xhr.onload=()=>{zone.classList.remove('uploading');uploading=false;"
     "if(xhr.status===200){let r=JSON.parse(xhr.responseText);showStatus('✓ '+r.message,'success');text.textContent='Complete! Restarting...';setTimeout(()=>location.reload(),5000);}"
-    "else{showStatus('✗ Upload failed: '+xhr.responseText,'error');progress.style.display='none';}};"
-    "xhr.onerror=()=>{zone.classList.remove('uploading');showStatus('✗ Network error','error');progress.style.display='none';};"
-    "xhr.open('POST','/ota');xhr.send(file);}"
+    "else{showStatus('✗ Upload failed: '+xhr.responseText,'error');progress.style.display='none';startStatusPolling();}};"
+    "xhr.onerror=()=>{zone.classList.remove('uploading');uploading=false;showStatus('✗ Network error','error');progress.style.display='none';startStatusPolling();};"
+    "xhr.open('POST','/ota');xhr.timeout=120000;xhr.send(file);}"
     "function showStatus(msg,type){let el=document.getElementById('status-msg');el.textContent=msg;el.className='status-msg '+type;}"
     "function hideStatus(){document.getElementById('status-msg').className='status-msg';}"
     "function rollback(){if(!confirm('Rollback to previous firmware? Device will restart.'))return;"
     "fetch('/ota/rollback',{method:'POST'}).then(r=>r.json()).then(d=>{showStatus(d.message,'success');setTimeout(()=>location.reload(),3000)}).catch(e=>showStatus('Rollback failed','error'));}"
     "function confirmFirmware(){fetch('/ota/confirm',{method:'POST'}).then(r=>r.json()).then(d=>{showStatus(d.message,'success');loadStatus()}).catch(e=>showStatus('Confirm failed','error'));}"
-    "function loadStatus(){fetch('/ota/status').then(r=>r.json()).then(d=>{"
+    "function loadStatus(){if(uploading)return;fetch('/ota/status').then(r=>r.json()).then(d=>{"
     "document.getElementById('version').textContent=d.version;"
     "document.getElementById('project').textContent=d.project_name;"
     "document.getElementById('compile-time').textContent=d.compile_time;"
@@ -151,7 +153,8 @@ static const char *ota_page =
     "if(d.ota_state==='pending_verify'){document.getElementById('pending-warning').style.display='block';document.getElementById('confirm-btn').style.display='inline-flex';}"
     "else{document.getElementById('pending-warning').style.display='none';document.getElementById('confirm-btn').style.display='none';}"
     "}).catch(()=>{})};"
-    "loadStatus();setInterval(loadStatus,10000);"
+    "function startStatusPolling(){if(!statusInterval)statusInterval=setInterval(loadStatus,10000);}"
+    "loadStatus();startStatusPolling();"
     "</script></body></html>";
 
 /**
@@ -179,7 +182,7 @@ static esp_err_t ota_page_handler(httpd_req_t *req)
 static esp_err_t ota_upload_handler(httpd_req_t *req)
 {
     esp_err_t err;
-    char buf[1024];
+    char buf[4096];  // Larger buffer for efficient flash writes
     int received;
     int remaining = req->content_len;
     bool first_chunk = true;
