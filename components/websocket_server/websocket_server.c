@@ -8,6 +8,7 @@
 #include "esp_timer.h"
 #include "boiler_manager.h"
 #include "opentherm_gateway.h"
+#include "opentherm_rmt.h"
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -70,6 +71,8 @@ static const char *dashboard_page =
     "<div class='stat'><div class='stat-value' id='partition'>--</div><div class='stat-label'>Partition</div></div></div></div>"
     "<div class='container'><div class='grid'>"
     "<a href='/logs' class='feature-card'><div class='feature-icon logs'>📊</div><h3>Live Logs</h3><p>Monitor OpenTherm messages in real-time. View requests and responses between your thermostat and boiler.</p></a>"
+    "<a href='/diagnostics' class='feature-card'><div class='feature-icon' style='background:linear-gradient(135deg,#f59e0b,#d97706)'>🔧</div><h3>Diagnostics</h3><p>View real-time boiler diagnostics including temperatures, pressures, and system status.</p></a>"
+    "<a href='/write' class='feature-card'><div class='feature-icon' style='background:linear-gradient(135deg,var(--accent2),#6d28d9)'>✏️</div><h3>Manual Write</h3><p>Send WRITE_DATA frames directly to the boiler. Manually control setpoints and other writable parameters.</p></a>"
     "<a href='/ota' class='feature-card'><div class='feature-icon ota'>⬆️</div><h3>OTA Update</h3><p>Upload new firmware over-the-air. View current version, manage rollbacks, and update safely.</p></a>"
     "</div></div>"
     "<script>fetch('/ota/status').then(r=>r.json()).then(d=>{"
@@ -103,7 +106,7 @@ static const char *logs_page =
     ".msg-count{color:var(--muted);font-size:13px;margin-left:auto}"
     "</style></head><body>"
     "<nav><a href='/' class='logo'><svg viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2'><path d='M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5'/></svg>OT Gateway</a>"
-    "<div class='nav-links'><a href='/'>Dashboard</a><a href='/logs'>Logs</a><a href='/diagnostics'>Diagnostics</a><a href='/ota'>OTA Update</a></div></nav>"
+    "<div class='nav-links'><a href='/'>Dashboard</a><a href='/logs'>Logs</a><a href='/diagnostics'>Diagnostics</a><a href='/write'>Manual Write</a><a href='/ota'>OTA Update</a></div></nav>"
     "<div class='container'><h1>Live Logs</h1><p class='subtitle'>Real-time OpenTherm message monitor</p>"
     "<div class='card'><div class='toolbar'>"
     "<div class='status-indicator'><div class='status-dot' id='status-dot'></div><span id='status-text'>Disconnected</span></div>"
@@ -173,7 +176,7 @@ static const char *diagnostics_page =
     ".all-values-table tr:hover{background:var(--card-hover)}"
     "</style></head><body>"
     "<nav><a href='/' class='logo'><svg viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2'><path d='M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5'/></svg>OT Gateway</a>"
-    "<div class='nav-links'><a href='/'>Dashboard</a><a href='/logs'>Logs</a><a href='/diagnostics' class='active'>Diagnostics</a><a href='/ota'>OTA Update</a></div></nav>"
+    "<div class='nav-links'><a href='/'>Dashboard</a><a href='/logs'>Logs</a><a href='/diagnostics'>Diagnostics</a><a href='/write' class='active'>Manual Write</a><a href='/ota'>OTA Update</a></div></nav>"
     "<div class='container'><h1>Boiler Diagnostics</h1><p class='subtitle'>Real-time boiler state monitoring</p>"
     "<div class='section-title'>Temperatures</div>"
     "<div class='diagnostics-grid' id='temps'></div>"
@@ -257,6 +260,120 @@ static const char *diagnostics_page =
     "updateDiagnostics();setInterval(updateDiagnostics,2000);"
     "</script></body></html>";
 
+// Manual write page HTML
+static const char *write_page = 
+    "<!DOCTYPE html><html><head><meta charset='UTF-8'><meta name='viewport' content='width=device-width,initial-scale=1'>"
+    "<title>Manual Write - OpenTherm Gateway</title><style>%s"
+    ".form-group{margin-bottom:20px}"
+    ".form-label{display:block;color:var(--text);font-size:14px;font-weight:500;margin-bottom:8px}"
+    ".form-input,.form-select{padding:10px 12px;border:1px solid var(--border);border-radius:8px;background:var(--bg);color:var(--text);font-size:14px;font-family:inherit;width:100%%;box-sizing:border-box}"
+    ".form-input:focus,.form-select:focus{outline:none;border-color:var(--accent)}"
+    ".form-row{display:grid;grid-template-columns:1fr 1fr;gap:16px}"
+    ".form-help{color:var(--muted);font-size:12px;margin-top:4px}"
+    ".response-box{background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:16px;margin-top:24px;font-family:monospace;font-size:13px;white-space:pre-wrap;word-break:break-all}"
+    ".response-box.success{border-color:var(--accent);background:rgba(0,212,170,0.05)}"
+    ".response-box.error{border-color:#ef4444;background:rgba(239,68,68,0.05)}"
+    ".preset-buttons{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:16px}"
+    ".preset-btn{padding:6px 12px;border:1px solid var(--border);border-radius:6px;background:var(--card);color:var(--text);font-size:12px;cursor:pointer;transition:all 0.2s}"
+    ".preset-btn:hover{background:var(--border);border-color:var(--accent)}"
+    "</style></head><body>"
+    "<nav><a href='/' class='logo'><svg viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2'><path d='M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5'/></svg>OT Gateway</a>"
+    "<div class='nav-links'><a href='/'>Dashboard</a><a href='/logs'>Logs</a><a href='/diagnostics'>Diagnostics</a><a href='/write' class='active'>Manual Write</a><a href='/ota'>OTA Update</a></div></nav>"
+    "<div class='container'><h1>Manual WRITE_DATA Frame</h1><p class='subtitle'>Send WRITE_DATA frames directly to the boiler</p>"
+    "<div class='card'><div class='preset-buttons'>"
+    "<button class='preset-btn' onclick='setPreset(1,\"float\",20.0)'>TSet (20°C)</button>"
+    "<button class='preset-btn' onclick='setPreset(1,\"float\",30.0)'>TSet (30°C)</button>"
+    "<button class='preset-btn' onclick='setPreset(1,\"float\",40.0)'>TSet (40°C)</button>"
+    "<button class='preset-btn' onclick='setPreset(1,\"float\",50.0)'>TSet (50°C)</button>"
+    "<button class='preset-btn' onclick='setPreset(8,\"float\",30.0)'>TSetCH2 (30°C)</button>"
+    "<button class='preset-btn' onclick='setPreset(16,\"float\",20.0)'>Troom Setpoint (20°C)</button>"
+    "<button class='preset-btn' onclick='setPreset(14,\"uint16\",50)'>Max Mod Level (50%%)</button>"
+    "</div>"
+    "<form id='write-form' onsubmit='sendWrite(event)'>"
+    "<div class='form-row'>"
+    "<div class='form-group'><label class='form-label'>Data ID</label>"
+    "<select id='data_id' class='form-select' required>"
+    "<option value='1'>1 - TSet (Control Setpoint)</option>"
+    "<option value='2'>2 - Master Configuration</option>"
+    "<option value='4'>4 - Command</option>"
+    "<option value='6'>6 - Remote Override</option>"
+    "<option value='7'>7 - Cooling Control</option>"
+    "<option value='8'>8 - TSetCH2</option>"
+    "<option value='9'>9 - Troom Override</option>"
+    "<option value='10'>10 - TSP (Setpoint Override)</option>"
+    "<option value='14'>14 - Max Rel Mod Level Setting</option>"
+    "<option value='16'>16 - Troom Setpoint</option>"
+    "<option value='custom'>Custom...</option>"
+    "</select><div class='form-help'>Select the data ID to write</div></div>"
+    "<div class='form-group' id='custom_id_group' style='display:none'><label class='form-label'>Custom Data ID</label>"
+    "<input type='number' id='custom_data_id' class='form-input' min='0' max='255' placeholder='0-255'></div></div>"
+    "<div class='form-row'>"
+    "<div class='form-group'><label class='form-label'>Data Type</label>"
+    "<select id='data_type' class='form-select' required>"
+    "<option value='float'>Float (f8.8) - Temperature</option>"
+    "<option value='uint16'>Uint16 - Raw value</option>"
+    "<option value='flags'>Flags - Bit field</option>"
+    "</select><div class='form-help'>Format of the data value</div></div>"
+    "<div class='form-group'><label class='form-label'>Data Value</label>"
+    "<input type='text' id='data_value' class='form-input' required placeholder='e.g., 20.5 or 12345'>"
+    "<div class='form-help'>For float: temperature in °C. For uint16: 0-65535. For flags: hex (0x1234)</div></div></div>"
+    "<button type='submit' class='btn btn-primary'>Send WRITE_DATA Frame</button></form>"
+    "<div id='response' class='response-box' style='display:none'></div></div></div>"
+    "<script>"
+    "document.getElementById('data_id').addEventListener('change',function(e){"
+    "document.getElementById('custom_id_group').style.display=e.target.value==='custom'?'block':'none';"
+    "});"
+    "function setPreset(id,type,value){"
+    "document.getElementById('data_id').value=id.toString();"
+    "document.getElementById('data_type').value=type;"
+    "document.getElementById('data_value').value=value.toString();"
+    "document.getElementById('custom_id_group').style.display='none';"
+    "}"
+    "function sendWrite(e){"
+    "e.preventDefault();"
+    "let dataId=document.getElementById('data_id').value;"
+    "if(dataId==='custom'){dataId=document.getElementById('custom_data_id').value;}"
+    "let dataType=document.getElementById('data_type').value;"
+    "let dataValue=document.getElementById('data_value').value;"
+    "let responseBox=document.getElementById('response');"
+    "responseBox.style.display='block';"
+    "responseBox.className='response-box';"
+    "responseBox.textContent='Sending...';"
+    "let payload={data_id:parseInt(dataId),data_value:dataType==='float'?parseFloat(dataValue):dataType==='flags'?parseInt(dataValue,16):parseInt(dataValue),data_type:dataType};"
+    "fetch('/api/write',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)})"
+    ".then(r=>r.json()).then(d=>{"
+    "if(d.success){"
+    "responseBox.className='response-box success';"
+    "responseBox.textContent='Success!\\nRequest: Data ID='+d.request.data_id+', Value='+d.request.data_value+'\\n'"
+    "+'Response Frame: 0x'+d.response.frame.toString(16).toUpperCase().padStart(8,'0')+'\\n'"
+    "+'Response Type: '+d.response.type+'\\n'"
+    "+'Response Data ID: '+d.response.data_id+'\\n'"
+    "+'Response Data Value: '+d.response.data_value;"
+    "}else{"
+    "responseBox.className='response-box error';"
+    "responseBox.textContent='Error: '+d.error+' (code: '+d.error_code+')';"
+    "}"
+    "}).catch(err=>{"
+    "responseBox.className='response-box error';"
+    "responseBox.textContent='Network error: '+err.message;"
+    "});"
+    "}"
+    "</script></body></html>";
+
+// HTTP GET handler for write page
+static esp_err_t write_handler(httpd_req_t *req)
+{
+    httpd_resp_set_type(req, "text/html");
+    char *page = malloc(16384);
+    if (page) {
+        snprintf(page, 16384, write_page, common_styles);
+        httpd_resp_send(req, page, strlen(page));
+        free(page);
+        return ESP_OK;
+    }
+    return httpd_resp_send_500(req);
+}
+
 // HTTP GET handler for diagnostics page
 static esp_err_t diagnostics_handler(httpd_req_t *req)
 {
@@ -269,6 +386,135 @@ static esp_err_t diagnostics_handler(httpd_req_t *req)
         return ESP_OK;
     }
     return httpd_resp_send_500(req);
+}
+
+// API handler for manual WRITE_DATA frame injection
+static esp_err_t write_api_handler(httpd_req_t *req)
+{
+    boiler_manager_t *bm = (boiler_manager_t *)opentherm_gateway_get_boiler_manager();
+    if (!bm) {
+        httpd_resp_set_status(req, "500 Internal Server Error");
+        httpd_resp_send(req, "{\"error\":\"Boiler manager not available\"}", -1);
+        return ESP_FAIL;
+    }
+    
+    // Read request body
+    char content[256];
+    int ret = httpd_req_recv(req, content, sizeof(content) - 1);
+    if (ret <= 0) {
+        httpd_resp_set_status(req, "400 Bad Request");
+        httpd_resp_send(req, "{\"error\":\"Failed to read request body\"}", -1);
+        return ESP_FAIL;
+    }
+    content[ret] = '\0';
+    
+    // Parse JSON manually (simple parsing to avoid dependencies)
+    // Expected format: {"data_id": 1, "data_value": 12345, "data_type": "float"}
+    uint8_t data_id = 0;
+    uint16_t data_value = 0;
+    bool has_data_id = false, has_data_value = false;
+    bool is_float = false;
+    
+    // Simple JSON parsing - find data_id and data_value
+    char *p = content;
+    while (*p) {
+        // Find "data_id"
+        if (strncmp(p, "\"data_id\"", 9) == 0) {
+            p += 9;
+            // Skip whitespace and colon
+            while (*p && (*p == ' ' || *p == ':' || *p == '\t')) p++;
+            // Parse number
+            if (*p >= '0' && *p <= '9') {
+                data_id = (uint8_t)atoi(p);
+                has_data_id = true;
+            }
+        }
+        // Find "data_value"
+        else if (strncmp(p, "\"data_value\"", 12) == 0) {
+            p += 12;
+            // Skip whitespace and colon
+            while (*p && (*p == ' ' || *p == ':' || *p == '\t')) p++;
+            // Check if it's a float (contains decimal point)
+            char *value_start = p;
+            if (strchr(value_start, '.')) {
+                float float_val = atof(value_start);
+                // Encode as f8.8 format
+                data_value = (uint16_t)((int16_t)(float_val * 256.0f));
+                is_float = true;
+            } else {
+                // Check for hex (0x prefix)
+                if (value_start[0] == '0' && (value_start[1] == 'x' || value_start[1] == 'X')) {
+                    data_value = (uint16_t)strtoul(value_start, NULL, 16);
+                } else {
+                    data_value = (uint16_t)atoi(value_start);
+                }
+            }
+            has_data_value = true;
+        }
+        // Find "data_type" to determine if we should treat as float
+        else if (strncmp(p, "\"data_type\"", 11) == 0) {
+            p += 11;
+            while (*p && (*p == ' ' || *p == ':' || *p == '\t' || *p == '"')) p++;
+            if (strncmp(p, "float", 5) == 0) {
+                is_float = true;
+            }
+        }
+        p++;
+    }
+    
+    // If data_type is float but we parsed as int, re-parse
+    if (is_float && !strchr(content, '.')) {
+        // Find data_value again and parse as float
+        p = content;
+        while (*p) {
+            if (strncmp(p, "\"data_value\"", 12) == 0) {
+                p += 12;
+                while (*p && (*p == ' ' || *p == ':' || *p == '\t')) p++;
+                float float_val = atof(p);
+                data_value = (uint16_t)((int16_t)(float_val * 256.0f));
+                break;
+            }
+            p++;
+        }
+    }
+    
+    if (!has_data_id || !has_data_value) {
+        httpd_resp_set_status(req, "400 Bad Request");
+        httpd_resp_send(req, "{\"error\":\"Missing data_id or data_value\"}", -1);
+        return ESP_FAIL;
+    }
+    
+    // Send WRITE_DATA frame
+    uint32_t response_frame = 0;
+    esp_err_t err = boiler_manager_write_data(bm, data_id, data_value, &response_frame);
+    
+    // Build JSON response
+    char json_response[512];
+    if (err == ESP_OK) {
+        OpenThermRmtMessageType response_type = opentherm_rmt_get_message_type(response_frame);
+        uint16_t response_data = opentherm_rmt_get_uint16(response_frame);
+        
+        snprintf(json_response, sizeof(json_response),
+                 "{\"success\":true,\"request\":{\"data_id\":%d,\"data_value\":%d},"
+                 "\"response\":{\"frame\":%lu,\"type\":%d,\"data_id\":%d,\"data_value\":%d}}",
+                 data_id, data_value,
+                 (unsigned long)response_frame, response_type,
+                 opentherm_rmt_get_data_id(response_frame), response_data);
+    } else {
+        const char *error_msg = "Unknown error";
+        if (err == ESP_ERR_TIMEOUT) error_msg = "Timeout waiting for response";
+        else if (err == ESP_ERR_INVALID_RESPONSE) error_msg = "Invalid response from boiler";
+        else if (err == ESP_ERR_NOT_FOUND) error_msg = "Unknown data ID";
+        
+        snprintf(json_response, sizeof(json_response),
+                 "{\"success\":false,\"error\":\"%s\",\"error_code\":%d}",
+                 error_msg, err);
+    }
+    
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_send(req, json_response, strlen(json_response));
+    
+    return ESP_OK;
 }
 
 // API handler for diagnostics JSON
@@ -473,6 +719,15 @@ esp_err_t websocket_server_start(websocket_server_t *ws_server)
     };
     httpd_register_uri_handler(ws_server->server, &diagnostics_uri);
     
+    // Register write page handler
+    httpd_uri_t write_uri = {
+        .uri = "/write",
+        .method = HTTP_GET,
+        .handler = write_handler,
+        .user_ctx = NULL
+    };
+    httpd_register_uri_handler(ws_server->server, &write_uri);
+    
     // Register diagnostics API handler
     httpd_uri_t diagnostics_api_uri = {
         .uri = "/api/diagnostics",
@@ -481,6 +736,15 @@ esp_err_t websocket_server_start(websocket_server_t *ws_server)
         .user_ctx = NULL
     };
     httpd_register_uri_handler(ws_server->server, &diagnostics_api_uri);
+    
+    // Register manual write API handler
+    httpd_uri_t write_api_uri = {
+        .uri = "/api/write",
+        .method = HTTP_POST,
+        .handler = write_api_handler,
+        .user_ctx = NULL
+    };
+    httpd_register_uri_handler(ws_server->server, &write_api_uri);
     
     // Register WebSocket handler
     httpd_uri_t ws_uri = {

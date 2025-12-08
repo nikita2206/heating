@@ -11,6 +11,8 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include "opentherm_rmt.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -104,6 +106,13 @@ typedef struct boiler_manager {
     uint32_t intercept_rate;      // Intercept every Nth ID=0 frame (e.g., 10 = intercept 1 in 10)
     uint32_t id0_frame_counter;   // Counter for ID=0 frames seen
     
+    // Manual write frame injection (queued, injected via interceptor)
+    bool manual_write_pending;    // True if a manual write frame is queued
+    uint32_t manual_write_frame;  // The frame to inject
+    uint32_t manual_write_response; // Response frame (set by interceptor)
+    esp_err_t manual_write_result; // Result code (set by interceptor)
+    SemaphoreHandle_t manual_write_sem; // Semaphore to signal completion
+    
     // Reference to OpenTherm RMT instance
     OpenThermRmt *ot_instance;
 } boiler_manager_t;
@@ -147,6 +156,17 @@ const boiler_diagnostics_t* boiler_manager_get_diagnostics(boiler_manager_t *bm)
  * @return ESP_OK on success
  */
 esp_err_t boiler_manager_inject_command(boiler_manager_t *bm, uint8_t data_id);
+
+/**
+ * Send a WRITE_DATA frame to the boiler and receive response
+ * 
+ * @param bm Boiler manager instance
+ * @param data_id Data ID to write
+ * @param data_value 16-bit data value (already encoded)
+ * @param response_frame Buffer to receive response frame (can be NULL)
+ * @return ESP_OK on success, ESP_ERR_TIMEOUT on timeout, ESP_FAIL on error
+ */
+esp_err_t boiler_manager_write_data(boiler_manager_t *bm, uint8_t data_id, uint16_t data_value, uint32_t *response_frame);
 
 #ifdef __cplusplus
 }

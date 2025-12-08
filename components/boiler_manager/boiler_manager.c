@@ -222,6 +222,14 @@ esp_err_t boiler_manager_init(boiler_manager_t *bm, boiler_manager_mode_t mode, 
     bm->intercept_rate = (intercept_rate == 0) ? 10 : intercept_rate;
     bm->id0_frame_counter = 0;
     
+    // Initialize manual write synchronization
+    bm->manual_write_pending = false;
+    bm->manual_write_sem = xSemaphoreCreateBinary();
+    if (!bm->manual_write_sem) {
+        ESP_LOGE(TAG, "Failed to create manual write semaphore");
+        return ESP_ERR_NO_MEM;
+    }
+    
     ESP_LOGI(TAG, "Boiler manager initialized in %s mode with %d diagnostic commands, intercept rate: 1/%d",
              mode == BOILER_MANAGER_MODE_PROXY ? "PROXY" : "PASSTHROUGH",
              bm->diag_commands_count, bm->intercept_rate);
@@ -237,7 +245,69 @@ bool boiler_manager_request_interceptor(OpenThermRmt *ot, OpenThermRmtMessage *r
         return false;  // Allow passthrough
     }
     
-    // Check if this is an ID=0 (Status) request from thermostat
+    // PRIORITY 1: Check if there's a pending manual write frame
+    // Manual writes take priority over diagnostics
+    if (bm->manual_write_pending) {
+        ESP_LOGI(TAG, "Intercepting ID=0 request, injecting manual WRITE_DATA frame: 0x%08lX",
+                 (unsigned long)bm->manual_write_frame);
+        
+        // Send manual write frame to boiler
+        esp_err_t ret = opentherm_rmt_send_frame(bm->ot_instance, bm->manual_write_frame, 
+                                                  &bm->ot_instance->secondary);
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to send manual WRITE_DATA frame: %s", esp_err_to_name(ret));
+            bm->manual_write_result = ret;
+            bm->manual_write_pending = false;
+            xSemaphoreGive(bm->manual_write_sem);  // Signal completion (with error)
+            return true;  // Block the ID=0 request
+        }
+        
+        // Wait for response from boiler
+        uint32_t response_frame = 0;
+        ret = opentherm_rmt_receive_frame(bm->ot_instance, &bm->ot_instance->secondary, &response_frame, 800);
+        
+        if (ret == ESP_OK) {
+            // Validate response
+            uint8_t write_data_id = opentherm_rmt_get_data_id(bm->manual_write_frame);
+            if (opentherm_rmt_check_parity(response_frame) &&
+                opentherm_rmt_get_data_id(response_frame) == write_data_id) {
+                
+                OpenThermRmtMessageType response_type = opentherm_rmt_get_message_type(response_frame);
+                if (response_type == OT_RMT_MSGTYPE_WRITE_ACK) {
+                    ESP_LOGI(TAG, "Received WRITE_ACK for manual write: 0x%08lX", (unsigned long)response_frame);
+                    bm->manual_write_response = response_frame;
+                    bm->manual_write_result = ESP_OK;
+                } else if (response_type == OT_RMT_MSGTYPE_DATA_INVALID) {
+                    ESP_LOGW(TAG, "Boiler responded with DATA_INVALID to manual write");
+                    bm->manual_write_response = response_frame;
+                    bm->manual_write_result = ESP_ERR_INVALID_RESPONSE;
+                } else if (response_type == OT_RMT_MSGTYPE_UNKNOWN_DATAID) {
+                    ESP_LOGW(TAG, "Boiler responded with UNKNOWN_DATAID to manual write");
+                    bm->manual_write_response = response_frame;
+                    bm->manual_write_result = ESP_ERR_NOT_FOUND;
+                } else {
+                    ESP_LOGW(TAG, "Unexpected response type %d to manual write", response_type);
+                    bm->manual_write_response = response_frame;
+                    bm->manual_write_result = ESP_ERR_INVALID_RESPONSE;
+                }
+            } else {
+                ESP_LOGW(TAG, "Invalid response to manual write: 0x%08lX", (unsigned long)response_frame);
+                bm->manual_write_result = ESP_ERR_INVALID_RESPONSE;
+            }
+        } else {
+            ESP_LOGW(TAG, "Timeout waiting for manual WRITE_DATA response");
+            bm->manual_write_result = ESP_ERR_TIMEOUT;
+        }
+        
+        // Clear pending flag and signal completion
+        bm->manual_write_pending = false;
+        xSemaphoreGive(bm->manual_write_sem);
+        
+        // Block the ID=0 request - don't forward it to boiler
+        return true;  // Block this request
+    }
+    
+    // PRIORITY 2: Check if this is an ID=0 (Status) request from thermostat for diagnostic injection
     if (request && opentherm_rmt_get_data_id(request->data) == OT_RMT_MSGID_STATUS) {
         // Increment counter for ID=0 frames
         bm->id0_frame_counter++;
@@ -346,6 +416,56 @@ esp_err_t boiler_manager_inject_command(boiler_manager_t *bm, uint8_t data_id)
     }
     
     return ret;
+}
+
+esp_err_t boiler_manager_write_data(boiler_manager_t *bm, uint8_t data_id, uint16_t data_value, uint32_t *response_frame)
+{
+    if (!bm || !bm->ot_instance) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    
+    // Check if there's already a pending manual write
+    if (bm->manual_write_pending) {
+        ESP_LOGW(TAG, "Manual write already pending, rejecting new request");
+        return ESP_ERR_INVALID_STATE;
+    }
+    
+    // Build WRITE_DATA request
+    uint32_t request = opentherm_rmt_build_request(OT_RMT_MSGTYPE_WRITE_DATA, data_id, data_value);
+    
+    ESP_LOGI(TAG, "Queueing manual WRITE_DATA frame: ID=%d, Value=0x%04X (0x%08lX)", 
+             data_id, data_value, (unsigned long)request);
+    
+    // Clear semaphore (in case it was left in signaled state)
+    xSemaphoreTake(bm->manual_write_sem, 0);
+    
+    // Queue the frame for injection via interceptor
+    bm->manual_write_frame = request;
+    bm->manual_write_pending = true;
+    bm->manual_write_result = ESP_FAIL;  // Will be set by interceptor
+    bm->manual_write_response = 0;
+    
+    // Wait for interceptor to inject the frame and get response
+    // Timeout: thermostat sends requests every ~1 second, so wait up to 2 seconds
+    // to ensure we catch at least one ID=0 frame
+    const TickType_t timeout_ticks = pdMS_TO_TICKS(2000);
+    
+    if (xSemaphoreTake(bm->manual_write_sem, timeout_ticks) == pdTRUE) {
+        // Interceptor has completed the injection
+        esp_err_t ret = bm->manual_write_result;
+        
+        if (ret == ESP_OK && response_frame) {
+            *response_frame = bm->manual_write_response;
+        }
+        
+        ESP_LOGI(TAG, "Manual WRITE_DATA completed with result: %s", esp_err_to_name(ret));
+        return ret;
+    } else {
+        // Timeout - interceptor didn't get a chance to inject
+        ESP_LOGW(TAG, "Timeout waiting for manual WRITE_DATA injection (no ID=0 frame intercepted)");
+        bm->manual_write_pending = false;
+        return ESP_ERR_TIMEOUT;
+    }
 }
 
 
