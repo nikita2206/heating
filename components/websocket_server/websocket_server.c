@@ -6,8 +6,11 @@
 #include "esp_log.h"
 #include "esp_http_server.h"
 #include "esp_timer.h"
+#include "boiler_manager.h"
+#include "opentherm_gateway.h"
 #include <string.h>
 #include <stdio.h>
+#include <stdlib.h>
 
 static const char *TAG = "WebSocket";
 
@@ -60,7 +63,7 @@ static const char *dashboard_page =
     ".stat-label{font-size:12px;color:var(--muted);margin-top:4px}"
     "</style></head><body>"
     "<nav><a href='/' class='logo'><svg viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2'><path d='M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5'/></svg>OT Gateway</a>"
-    "<div class='nav-links'><a href='/' class='active'>Dashboard</a><a href='/logs'>Logs</a><a href='/ota'>OTA Update</a></div></nav>"
+    "<div class='nav-links'><a href='/' class='active'>Dashboard</a><a href='/logs'>Logs</a><a href='/diagnostics'>Diagnostics</a><a href='/ota'>OTA Update</a></div></nav>"
     "<div class='hero'><h1>OpenTherm Gateway</h1><p class='subtitle'>Monitor and manage your heating system</p>"
     "<div class='stats'><div class='stat'><div class='stat-value' id='uptime'>--</div><div class='stat-label'>Uptime</div></div>"
     "<div class='stat'><div class='stat-value' id='version'>--</div><div class='stat-label'>Firmware</div></div>"
@@ -100,7 +103,7 @@ static const char *logs_page =
     ".msg-count{color:var(--muted);font-size:13px;margin-left:auto}"
     "</style></head><body>"
     "<nav><a href='/' class='logo'><svg viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2'><path d='M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5'/></svg>OT Gateway</a>"
-    "<div class='nav-links'><a href='/'>Dashboard</a><a href='/logs' class='active'>Logs</a><a href='/ota'>OTA Update</a></div></nav>"
+    "<div class='nav-links'><a href='/'>Dashboard</a><a href='/logs'>Logs</a><a href='/diagnostics'>Diagnostics</a><a href='/ota'>OTA Update</a></div></nav>"
     "<div class='container'><h1>Live Logs</h1><p class='subtitle'>Real-time OpenTherm message monitor</p>"
     "<div class='card'><div class='toolbar'>"
     "<div class='status-indicator'><div class='status-dot' id='status-dot'></div><span id='status-text'>Disconnected</span></div>"
@@ -150,6 +153,205 @@ static esp_err_t logs_handler(httpd_req_t *req)
         return ESP_OK;
     }
     return httpd_resp_send_500(req);
+}
+
+// Diagnostics page HTML
+static const char *diagnostics_page = 
+    "<!DOCTYPE html><html><head><meta charset='UTF-8'><meta name='viewport' content='width=device-width,initial-scale=1'>"
+    "<title>Diagnostics - OpenTherm Gateway</title><style>%s"
+    ".diagnostics-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:16px;margin-top:24px}"
+    ".diag-card{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:16px}"
+    ".diag-label{color:var(--muted);font-size:12px;margin-bottom:4px}"
+    ".diag-value{font-size:20px;font-weight:600;color:var(--accent)}"
+    ".diag-value.invalid{color:var(--muted)}"
+    ".diag-timestamp{color:var(--muted);font-size:11px;margin-top:4px}"
+    ".section-title{font-size:18px;font-weight:600;margin-top:24px;margin-bottom:12px;border-bottom:1px solid var(--border);padding-bottom:8px}"
+    "</style></head><body>"
+    "<nav><a href='/' class='logo'><svg viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2'><path d='M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5'/></svg>OT Gateway</a>"
+    "<div class='nav-links'><a href='/'>Dashboard</a><a href='/logs'>Logs</a><a href='/diagnostics' class='active'>Diagnostics</a><a href='/ota'>OTA Update</a></div></nav>"
+    "<div class='container'><h1>Boiler Diagnostics</h1><p class='subtitle'>Real-time boiler state monitoring</p>"
+    "<div class='section-title'>Temperatures</div>"
+    "<div class='diagnostics-grid' id='temps'></div>"
+    "<div class='section-title'>Status</div>"
+    "<div class='diagnostics-grid' id='status'></div>"
+    "<div class='section-title'>Faults</div>"
+    "<div class='diagnostics-grid' id='faults'></div>"
+    "<div class='section-title'>Statistics</div>"
+    "<div class='diagnostics-grid' id='stats'></div>"
+    "<div class='section-title'>Fans & CO2</div>"
+    "<div class='diagnostics-grid' id='fans'></div>"
+    "</div>"
+    "<script>"
+    "function formatValue(val,valid,unit=''){"
+    "if(!valid||val===undefined||val===null)return'<span class=\"diag-value invalid\">--</span>';"
+    "return'<span class=\"diag-value\">'+val.toFixed(1)+unit+'</span>';"
+    "}"
+    "function formatTimestamp(ageMs){"
+    "if(!ageMs||ageMs<0)return'<span class=\"diag-timestamp\">Never</span>';"
+    "if(ageMs<60000)return'<span class=\"diag-timestamp\">'+(ageMs/1000).toFixed(0)+'s ago</span>';"
+    "if(ageMs<3600000)return'<span class=\"diag-timestamp\">'+(ageMs/60000).toFixed(0)+'m ago</span>';"
+    "return'<span class=\"diag-timestamp\">'+(ageMs/3600000).toFixed(1)+'h ago</span>';"
+    "}"
+    "function updateDiagnostics(){"
+    "fetch('/api/diagnostics').then(r=>r.json()).then(d=>{"
+    "let temps=document.getElementById('temps'),status=document.getElementById('status'),"
+    "faults=document.getElementById('faults'),stats=document.getElementById('stats'),"
+    "fans=document.getElementById('fans');"
+    "temps.innerHTML='';status.innerHTML='';faults.innerHTML='';stats.innerHTML='';fans.innerHTML='';"
+    "if(d.t_boiler){temps.innerHTML+='<div class=\"diag-card\"><div class=\"diag-label\">Boiler Temp</div>'+formatValue(d.t_boiler.value,d.t_boiler.valid,'°C')+formatTimestamp(d.t_boiler.age_ms)+'</div>';}"
+    "if(d.t_return){temps.innerHTML+='<div class=\"diag-card\"><div class=\"diag-label\">Return Temp</div>'+formatValue(d.t_return.value,d.t_return.valid,'°C')+formatTimestamp(d.t_return.age_ms)+'</div>';}"
+    "if(d.t_dhw){temps.innerHTML+='<div class=\"diag-card\"><div class=\"diag-label\">DHW Temp</div>'+formatValue(d.t_dhw.value,d.t_dhw.valid,'°C')+formatTimestamp(d.t_dhw.age_ms)+'</div>';}"
+    "if(d.t_outside){temps.innerHTML+='<div class=\"diag-card\"><div class=\"diag-label\">Outside Temp</div>'+formatValue(d.t_outside.value,d.t_outside.valid,'°C')+formatTimestamp(d.t_outside.age_ms)+'</div>';}"
+    "if(d.t_exhaust){temps.innerHTML+='<div class=\"diag-card\"><div class=\"diag-label\">Exhaust Temp</div>'+formatValue(d.t_exhaust.value,d.t_exhaust.valid,'°C')+formatTimestamp(d.t_exhaust.age_ms)+'</div>';}"
+    "if(d.t_setpoint){temps.innerHTML+='<div class=\"diag-card\"><div class=\"diag-label\">Setpoint Temp</div>'+formatValue(d.t_setpoint.value,d.t_setpoint.valid,'°C')+formatTimestamp(d.t_setpoint.age_ms)+'</div>';}"
+    "if(d.modulation_level){status.innerHTML+='<div class=\"diag-card\"><div class=\"diag-label\">Modulation Level</div>'+formatValue(d.modulation_level.value,d.modulation_level.valid,'%%')+formatTimestamp(d.modulation_level.age_ms)+'</div>';}"
+    "if(d.pressure){status.innerHTML+='<div class=\"diag-card\"><div class=\"diag-label\">Pressure</div>'+formatValue(d.pressure.value,d.pressure.valid,'bar')+formatTimestamp(d.pressure.age_ms)+'</div>';}"
+    "if(d.flow_rate){status.innerHTML+='<div class=\"diag-card\"><div class=\"diag-label\">DHW Flow Rate</div>'+formatValue(d.flow_rate.value,d.flow_rate.valid,'L/min')+formatTimestamp(d.flow_rate.age_ms)+'</div>';}"
+    "if(d.fault_code){faults.innerHTML+='<div class=\"diag-card\"><div class=\"diag-label\">Fault Code</div>'+formatValue(d.fault_code.value,d.fault_code.valid,'')+formatTimestamp(d.fault_code.age_ms)+'</div>';}"
+    "if(d.diag_code){faults.innerHTML+='<div class=\"diag-card\"><div class=\"diag-label\">Diagnostic Code</div>'+formatValue(d.diag_code.value,d.diag_code.valid,'')+formatTimestamp(d.diag_code.age_ms)+'</div>';}"
+    "if(d.burner_starts){stats.innerHTML+='<div class=\"diag-card\"><div class=\"diag-label\">Burner Starts</div>'+formatValue(d.burner_starts.value,d.burner_starts.valid,'')+formatTimestamp(d.burner_starts.age_ms)+'</div>';}"
+    "if(d.burner_hours){stats.innerHTML+='<div class=\"diag-card\"><div class=\"diag-label\">Burner Hours</div>'+formatValue(d.burner_hours.value,d.burner_hours.valid,'h')+formatTimestamp(d.burner_hours.age_ms)+'</div>';}"
+    "if(d.fan_current){fans.innerHTML+='<div class=\"diag-card\"><div class=\"diag-label\">Fan Speed</div>'+formatValue(d.fan_current.value,d.fan_current.valid,'%%')+formatTimestamp(d.fan_current.age_ms)+'</div>';}"
+    "if(d.co2_exhaust){fans.innerHTML+='<div class=\"diag-card\"><div class=\"diag-label\">CO2 Exhaust</div>'+formatValue(d.co2_exhaust.value,d.co2_exhaust.valid,'ppm')+formatTimestamp(d.co2_exhaust.age_ms)+'</div>';}"
+    "}).catch(err=>console.error('Failed to fetch diagnostics:',err));"
+    "}"
+    "updateDiagnostics();setInterval(updateDiagnostics,2000);"
+    "</script></body></html>";
+
+// HTTP GET handler for diagnostics page
+static esp_err_t diagnostics_handler(httpd_req_t *req)
+{
+    httpd_resp_set_type(req, "text/html");
+    char *page = malloc(16384);
+    if (page) {
+        snprintf(page, 16384, diagnostics_page, common_styles);
+        httpd_resp_send(req, page, strlen(page));
+        free(page);
+        return ESP_OK;
+    }
+    return httpd_resp_send_500(req);
+}
+
+// API handler for diagnostics JSON
+static esp_err_t diagnostics_api_handler(httpd_req_t *req)
+{
+    boiler_manager_t *bm = (boiler_manager_t *)opentherm_gateway_get_boiler_manager();
+    if (!bm) {
+        httpd_resp_set_status(req, "500 Internal Server Error");
+        httpd_resp_send(req, "{\"error\":\"Boiler manager not available\"}", -1);
+        return ESP_FAIL;
+    }
+    
+    const boiler_diagnostics_t *diag = boiler_manager_get_diagnostics(bm);
+    if (!diag) {
+        httpd_resp_set_status(req, "500 Internal Server Error");
+        httpd_resp_send(req, "{\"error\":\"Diagnostics not available\"}", -1);
+        return ESP_FAIL;
+    }
+    
+    // Calculate current time (milliseconds since boot)
+    int64_t current_time_ms = esp_timer_get_time() / 1000;
+    
+    // Helper macro to calculate age in milliseconds
+    #define CALC_AGE_MS(field) ((field.valid && field.timestamp_ms > 0) ? (current_time_ms - field.timestamp_ms) : -1)
+    
+    // Build JSON response manually (avoiding cJSON dependency)
+    // Use heap allocation to avoid stack overflow
+    const size_t json_buffer_size = 8192;
+    char *json_buffer = malloc(json_buffer_size);
+    if (!json_buffer) {
+        httpd_resp_set_status(req, "500 Internal Server Error");
+        httpd_resp_send(req, "{\"error\":\"Memory allocation failed\"}", -1);
+        return ESP_FAIL;
+    }
+    
+    int len = snprintf(json_buffer, json_buffer_size,
+        "{"
+        "\"t_boiler\":{\"value\":%.2f,\"age_ms\":%lld,\"valid\":%s},"
+        "\"t_return\":{\"value\":%.2f,\"age_ms\":%lld,\"valid\":%s},"
+        "\"t_dhw\":{\"value\":%.2f,\"age_ms\":%lld,\"valid\":%s},"
+        "\"t_dhw2\":{\"value\":%.2f,\"age_ms\":%lld,\"valid\":%s},"
+        "\"t_outside\":{\"value\":%.2f,\"age_ms\":%lld,\"valid\":%s},"
+        "\"t_exhaust\":{\"value\":%.2f,\"age_ms\":%lld,\"valid\":%s},"
+        "\"t_heat_exchanger\":{\"value\":%.2f,\"age_ms\":%lld,\"valid\":%s},"
+        "\"t_flow_ch2\":{\"value\":%.2f,\"age_ms\":%lld,\"valid\":%s},"
+        "\"t_storage\":{\"value\":%.2f,\"age_ms\":%lld,\"valid\":%s},"
+        "\"t_collector\":{\"value\":%.2f,\"age_ms\":%lld,\"valid\":%s},"
+        "\"t_setpoint\":{\"value\":%.2f,\"age_ms\":%lld,\"valid\":%s},"
+        "\"modulation_level\":{\"value\":%.2f,\"age_ms\":%lld,\"valid\":%s},"
+        "\"pressure\":{\"value\":%.2f,\"age_ms\":%lld,\"valid\":%s},"
+        "\"flow_rate\":{\"value\":%.2f,\"age_ms\":%lld,\"valid\":%s},"
+        "\"fault_code\":{\"value\":%.2f,\"age_ms\":%lld,\"valid\":%s},"
+        "\"diag_code\":{\"value\":%.2f,\"age_ms\":%lld,\"valid\":%s},"
+        "\"burner_starts\":{\"value\":%.2f,\"age_ms\":%lld,\"valid\":%s},"
+        "\"dhw_burner_starts\":{\"value\":%.2f,\"age_ms\":%lld,\"valid\":%s},"
+        "\"ch_pump_starts\":{\"value\":%.2f,\"age_ms\":%lld,\"valid\":%s},"
+        "\"dhw_pump_starts\":{\"value\":%.2f,\"age_ms\":%lld,\"valid\":%s},"
+        "\"burner_hours\":{\"value\":%.2f,\"age_ms\":%lld,\"valid\":%s},"
+        "\"dhw_burner_hours\":{\"value\":%.2f,\"age_ms\":%lld,\"valid\":%s},"
+        "\"ch_pump_hours\":{\"value\":%.2f,\"age_ms\":%lld,\"valid\":%s},"
+        "\"dhw_pump_hours\":{\"value\":%.2f,\"age_ms\":%lld,\"valid\":%s},"
+        "\"max_capacity\":{\"value\":%.2f,\"age_ms\":%lld,\"valid\":%s},"
+        "\"min_mod_level\":{\"value\":%.2f,\"age_ms\":%lld,\"valid\":%s},"
+        "\"fan_setpoint\":{\"value\":%.2f,\"age_ms\":%lld,\"valid\":%s},"
+        "\"fan_current\":{\"value\":%.2f,\"age_ms\":%lld,\"valid\":%s},"
+        "\"fan_exhaust_rpm\":{\"value\":%.2f,\"age_ms\":%lld,\"valid\":%s},"
+        "\"fan_supply_rpm\":{\"value\":%.2f,\"age_ms\":%lld,\"valid\":%s},"
+        "\"co2_exhaust\":{\"value\":%.2f,\"age_ms\":%lld,\"valid\":%s}"
+        "}",
+        diag->t_boiler.value, (long long)CALC_AGE_MS(diag->t_boiler), diag->t_boiler.valid ? "true" : "false",
+        diag->t_return.value, (long long)CALC_AGE_MS(diag->t_return), diag->t_return.valid ? "true" : "false",
+        diag->t_dhw.value, (long long)CALC_AGE_MS(diag->t_dhw), diag->t_dhw.valid ? "true" : "false",
+        diag->t_dhw2.value, (long long)CALC_AGE_MS(diag->t_dhw2), diag->t_dhw2.valid ? "true" : "false",
+        diag->t_outside.value, (long long)CALC_AGE_MS(diag->t_outside), diag->t_outside.valid ? "true" : "false",
+        diag->t_exhaust.value, (long long)CALC_AGE_MS(diag->t_exhaust), diag->t_exhaust.valid ? "true" : "false",
+        diag->t_heat_exchanger.value, (long long)CALC_AGE_MS(diag->t_heat_exchanger), diag->t_heat_exchanger.valid ? "true" : "false",
+        diag->t_flow_ch2.value, (long long)CALC_AGE_MS(diag->t_flow_ch2), diag->t_flow_ch2.valid ? "true" : "false",
+        diag->t_storage.value, (long long)CALC_AGE_MS(diag->t_storage), diag->t_storage.valid ? "true" : "false",
+        diag->t_collector.value, (long long)CALC_AGE_MS(diag->t_collector), diag->t_collector.valid ? "true" : "false",
+        diag->t_setpoint.value, (long long)CALC_AGE_MS(diag->t_setpoint), diag->t_setpoint.valid ? "true" : "false",
+        diag->modulation_level.value, (long long)CALC_AGE_MS(diag->modulation_level), diag->modulation_level.valid ? "true" : "false",
+        diag->pressure.value, (long long)CALC_AGE_MS(diag->pressure), diag->pressure.valid ? "true" : "false",
+        diag->flow_rate.value, (long long)CALC_AGE_MS(diag->flow_rate), diag->flow_rate.valid ? "true" : "false",
+        diag->fault_code.value, (long long)CALC_AGE_MS(diag->fault_code), diag->fault_code.valid ? "true" : "false",
+        diag->diag_code.value, (long long)CALC_AGE_MS(diag->diag_code), diag->diag_code.valid ? "true" : "false",
+        diag->burner_starts.value, (long long)CALC_AGE_MS(diag->burner_starts), diag->burner_starts.valid ? "true" : "false",
+        diag->dhw_burner_starts.value, (long long)CALC_AGE_MS(diag->dhw_burner_starts), diag->dhw_burner_starts.valid ? "true" : "false",
+        diag->ch_pump_starts.value, (long long)CALC_AGE_MS(diag->ch_pump_starts), diag->ch_pump_starts.valid ? "true" : "false",
+        diag->dhw_pump_starts.value, (long long)CALC_AGE_MS(diag->dhw_pump_starts), diag->dhw_pump_starts.valid ? "true" : "false",
+        diag->burner_hours.value, (long long)CALC_AGE_MS(diag->burner_hours), diag->burner_hours.valid ? "true" : "false",
+        diag->dhw_burner_hours.value, (long long)CALC_AGE_MS(diag->dhw_burner_hours), diag->dhw_burner_hours.valid ? "true" : "false",
+        diag->ch_pump_hours.value, (long long)CALC_AGE_MS(diag->ch_pump_hours), diag->ch_pump_hours.valid ? "true" : "false",
+        diag->dhw_pump_hours.value, (long long)CALC_AGE_MS(diag->dhw_pump_hours), diag->dhw_pump_hours.valid ? "true" : "false",
+        diag->max_capacity.value, (long long)CALC_AGE_MS(diag->max_capacity), diag->max_capacity.valid ? "true" : "false",
+        diag->min_mod_level.value, (long long)CALC_AGE_MS(diag->min_mod_level), diag->min_mod_level.valid ? "true" : "false",
+        diag->fan_setpoint.value, (long long)CALC_AGE_MS(diag->fan_setpoint), diag->fan_setpoint.valid ? "true" : "false",
+        diag->fan_current.value, (long long)CALC_AGE_MS(diag->fan_current), diag->fan_current.valid ? "true" : "false",
+        diag->fan_exhaust_rpm.value, (long long)CALC_AGE_MS(diag->fan_exhaust_rpm), diag->fan_exhaust_rpm.valid ? "true" : "false",
+        diag->fan_supply_rpm.value, (long long)CALC_AGE_MS(diag->fan_supply_rpm), diag->fan_supply_rpm.valid ? "true" : "false",
+        diag->co2_exhaust.value, (long long)CALC_AGE_MS(diag->co2_exhaust), diag->co2_exhaust.valid ? "true" : "false"
+    );
+    
+    // Ensure buffer is null-terminated and cap length to buffer size
+    if (len < 0) {
+        ESP_LOGE(TAG, "snprintf failed in diagnostics_api_handler");
+        free(json_buffer);
+        httpd_resp_set_status(req, "500 Internal Server Error");
+        httpd_resp_send(req, "{\"error\":\"Failed to format diagnostics\"}", -1);
+        return ESP_FAIL;
+    }
+    
+    // Cap length to buffer size (snprintf returns required length even if truncated)
+    if ((size_t)len >= json_buffer_size) {
+        len = json_buffer_size - 1;
+        json_buffer[len] = '\0';  // Ensure null termination
+    }
+    
+    httpd_resp_set_type(req, "application/json");
+    esp_err_t ret = httpd_resp_send(req, json_buffer, len);
+    free(json_buffer);
+    
+    return ret;
 }
 
 // WebSocket handler
@@ -222,6 +424,24 @@ esp_err_t websocket_server_start(websocket_server_t *ws_server)
         .user_ctx = NULL
     };
     httpd_register_uri_handler(ws_server->server, &logs_uri);
+    
+    // Register diagnostics page handler
+    httpd_uri_t diagnostics_uri = {
+        .uri = "/diagnostics",
+        .method = HTTP_GET,
+        .handler = diagnostics_handler,
+        .user_ctx = NULL
+    };
+    httpd_register_uri_handler(ws_server->server, &diagnostics_uri);
+    
+    // Register diagnostics API handler
+    httpd_uri_t diagnostics_api_uri = {
+        .uri = "/api/diagnostics",
+        .method = HTTP_GET,
+        .handler = diagnostics_api_handler,
+        .user_ctx = NULL
+    };
+    httpd_register_uri_handler(ws_server->server, &diagnostics_api_uri);
     
     // Register WebSocket handler
     httpd_uri_t ws_uri = {

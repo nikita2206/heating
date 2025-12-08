@@ -737,6 +737,14 @@ void opentherm_rmt_set_message_callback(OpenThermRmt *ot, opentherm_rmt_message_
     }
 }
 
+void opentherm_rmt_set_request_interceptor(OpenThermRmt *ot, opentherm_rmt_request_interceptor_t interceptor, void *user_data)
+{
+    if (ot) {
+        ot->request_interceptor = interceptor;
+        ot->interceptor_data = user_data;
+    }
+}
+
 // ============================================================================
 // Frame Transmission
 // ============================================================================
@@ -873,6 +881,13 @@ static esp_err_t receive_frame(OpenThermRmt *ot, OpenThermRmtInterface *iface,
     return ESP_OK;
 }
 
+// Exposed version for boiler_manager use
+esp_err_t opentherm_rmt_receive_frame(OpenThermRmt *ot, OpenThermRmtInterface *iface, 
+                                      uint32_t *frame, uint32_t timeout_ms)
+{
+    return receive_frame(ot, iface, frame, timeout_ms);
+}
+
 // ============================================================================
 // High-Level Communication
 // ============================================================================
@@ -978,6 +993,15 @@ bool opentherm_rmt_gateway_process(OpenThermRmt *ot, OpenThermRmtMessage *reques
                 // Log the request
                 if (ot->message_callback) {
                     ot->message_callback(ot, &ot->gateway_request, OT_RMT_ROLE_MASTER);
+                }
+                
+                // Check if request should be intercepted (e.g., ID=0 for diagnostic injection)
+                if (ot->request_interceptor && ot->request_interceptor(ot, &ot->gateway_request)) {
+                    // Request was intercepted - don't forward, go back to waiting
+                    ESP_LOGD(TAG, "Gateway: Request intercepted, not forwarding");
+                    ot->gateway_state = OT_RMT_GATEWAY_STATE_WAITING_REQUEST;
+                    ot->gateway_timer_start = now;
+                    break;
                 }
                 
                 // Forward to boiler

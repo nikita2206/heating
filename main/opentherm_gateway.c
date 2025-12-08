@@ -27,6 +27,7 @@
 #include "opentherm_rmt.h"
 #include "websocket_server.h"
 #include "ota_update.h"
+#include "boiler_manager.h"
 
 static const char *TAG = "OT_GATEWAY";
 
@@ -38,6 +39,13 @@ static EventGroupHandle_t s_wifi_event_group;
 static int s_retry_num = 0;
 static websocket_server_t ws_server;
 static OpenThermRmt ot;
+static boiler_manager_t boiler_mgr;
+
+// Getter for boiler manager (for HTTP handlers)
+struct boiler_manager* opentherm_gateway_get_boiler_manager(void)
+{
+    return &boiler_mgr;
+}
 
 /* Console initialization for USB Serial JTAG */
 #if CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG
@@ -236,6 +244,19 @@ static void opentherm_gateway_task(void *pvParameters)
     
     // Register callback for logging each captured frame (both directions)
     opentherm_rmt_set_message_callback(&ot, opentherm_message_callback, NULL);
+    
+    // Initialize boiler manager for diagnostic injection
+    // Intercept 1 out of every 10 ID=0 frames (configurable)
+    // This allows most status queries to pass through while still collecting diagnostics
+    uint32_t intercept_rate = 10;  // Can be made configurable via menuconfig or runtime setting
+    if (boiler_manager_init(&boiler_mgr, BOILER_MANAGER_MODE_PROXY, &ot, intercept_rate) != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to initialize boiler manager");
+        vTaskDelete(NULL);
+        return;
+    }
+    
+    // Set up request interceptor for ID=0 interception
+    opentherm_rmt_set_request_interceptor(&ot, boiler_manager_request_interceptor, &boiler_mgr);
     
     // Start the RMT channels
     ret = opentherm_rmt_start(&ot);

@@ -73,6 +73,9 @@ typedef struct OpenThermRmt OpenThermRmt;
 // Callback for handling received messages (used in gateway mode)
 typedef void (*opentherm_rmt_message_callback_t)(OpenThermRmt *ot, OpenThermRmtMessage *message, OpenThermRmtRole from_role);
 
+// Callback for intercepting requests before forwarding (returns true to block forwarding)
+typedef bool (*opentherm_rmt_request_interceptor_t)(OpenThermRmt *ot, OpenThermRmtMessage *request);
+
 // RMT interface for one direction (TX + RX on a single OpenTherm bus)
 typedef struct {
     gpio_num_t rx_gpio;
@@ -114,6 +117,10 @@ struct OpenThermRmt {
     // Callback for message logging
     opentherm_rmt_message_callback_t message_callback;
     void *user_data;
+    
+    // Callback for request interception (returns true to block forwarding)
+    opentherm_rmt_request_interceptor_t request_interceptor;
+    void *interceptor_data;
     
     // Synchronization
     SemaphoreHandle_t tx_done_sem;
@@ -180,6 +187,11 @@ esp_err_t opentherm_rmt_deinit(OpenThermRmt *ot);
 void opentherm_rmt_set_message_callback(OpenThermRmt *ot, opentherm_rmt_message_callback_t callback, void *user_data);
 
 /**
+ * Set callback for request interception (returns true to block forwarding)
+ */
+void opentherm_rmt_set_request_interceptor(OpenThermRmt *ot, opentherm_rmt_request_interceptor_t interceptor, void *user_data);
+
+/**
  * Send a request (master role) and wait for response
  * 
  * @param ot        OpenTherm instance
@@ -200,6 +212,18 @@ esp_err_t opentherm_rmt_send_response(OpenThermRmt *ot, OpenThermRmtMessage *res
  * Send a raw frame on specified interface
  */
 esp_err_t opentherm_rmt_send_frame(OpenThermRmt *ot, uint32_t frame, OpenThermRmtInterface *iface);
+
+/**
+ * Receive a frame from specified interface (for advanced use cases like diagnostic injection)
+ * 
+ * @param ot OpenTherm instance
+ * @param iface Interface to receive from
+ * @param frame Buffer to receive frame
+ * @param timeout_ms Timeout in milliseconds
+ * @return ESP_OK on success, ESP_ERR_TIMEOUT on timeout
+ */
+esp_err_t opentherm_rmt_receive_frame(OpenThermRmt *ot, OpenThermRmtInterface *iface, 
+                                      uint32_t *frame, uint32_t timeout_ms);
 
 // ============================================================================
 // Gateway Functions
