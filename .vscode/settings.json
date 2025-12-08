@@ -3,12 +3,12 @@
   "idf.espIdfPath": "/Users/nikita/esp/v5.5.1/esp-idf",
   "idf.pythonInstallPath": "/Users/nikita/.pyenv/shims/python",
   "idf.openOcdConfigs": [
-    "board/esp32c6-lpcore-builtin.cfg"
+    "board/esp32-wrover-kit-3.3v.cfg"
   ],
   "idf.port": "/dev/tty.debug-console",
   "idf.toolsPath": "/Users/nikita/.espressif",
   "idf.customExtraVars": {
-    "IDF_TARGET": "esp32c6"
+    "IDF_TARGET": "esp32"
   },
   "files.associations": {
     "*.java": "java",

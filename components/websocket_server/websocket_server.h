@@ -37,6 +37,9 @@ esp_err_t websocket_server_send_opentherm_message(websocket_server_t *ws_server,
                                                    uint8_t data_id,
                                                    uint16_t data_value);
 
+// Get HTTP server handle (for registering additional handlers like OTA)
+httpd_handle_t websocket_server_get_handle(websocket_server_t *ws_server);
+
 #ifdef __cplusplus
 }
 #endif

@@ -24,6 +24,7 @@
 #include "opentherm_gateway.h"
 #include "opentherm.h"
 #include "websocket_server.h"
+#include "ota_update.h"
 
 static const char *TAG = "OT_GATEWAY";
 
@@ -211,7 +212,14 @@ static void opentherm_gateway_task(void *pvParameters)
         return;
     }
     
+    // Register OTA update handlers with the HTTP server
+    httpd_handle_t http_server = websocket_server_get_handle(&ws_server);
+    if (http_server) {
+        ota_update_register_handlers(http_server);
+    }
+    
     ESP_LOGI(TAG, "WebSocket server started. Connect to http://<device-ip>/ to view messages");
+    ESP_LOGI(TAG, "OTA update available at POST http://<device-ip>/ota");
     
     // Initialize OpenTherm gateway with dual interfaces
     // Master side connects to thermostat, slave side connects to boiler
@@ -334,6 +342,10 @@ static void opentherm_gateway_task(void *pvParameters)
 void app_main(void)
 {
     ESP_LOGI(TAG, "OpenTherm Gateway starting...");
+    ESP_LOGI(TAG, "Firmware version: %s", ota_update_get_version());
+    
+    // Validate OTA state early - handles rollback verification
+    ota_update_validate_app();
     
     // Initialize NVS for WiFi
     esp_err_t ret = nvs_flash_init();
