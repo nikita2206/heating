@@ -573,7 +573,27 @@ bool opentherm_gateway_process(OpenTherm *ot, OpenThermMessage *request, OpenThe
             if (ot->status == OT_STATUS_GATEWAY_REQUEST_READY) {
                 // Complete frame captured from thermostat
                 opentherm_disable_all_inputs(ot);
-                ot->gateway_request.data = ot->response;  // ISR stores frame in 'response' field
+                uint32_t captured_frame = ot->response;  // ISR stores frame in 'response' field
+                
+                // VALIDATION: Check parity and message type before accepting frame
+                // WHY: Noise on the line can create frames that look valid but have:
+                //   1. Invalid parity (corrupted bits)
+                //   2. Invalid message type (e.g., slave response types in a request)
+                if (!opentherm_check_parity(captured_frame)) {
+                    ESP_LOGW(TAG, "Gateway: Invalid parity in request frame 0x%08lX, discarding",
+                             (unsigned long)captured_frame);
+                    opentherm_prepare_receive(ot, OT_ROLE_MASTER);
+                    break;
+                }
+                
+                if (!opentherm_is_valid_request_type(captured_frame)) {
+                    ESP_LOGW(TAG, "Gateway: Invalid message type %d in request frame 0x%08lX, discarding",
+                             opentherm_get_message_type(captured_frame), (unsigned long)captured_frame);
+                    opentherm_prepare_receive(ot, OT_ROLE_MASTER);
+                    break;
+                }
+                
+                ot->gateway_request.data = captured_frame;
                 ot->gateway_timeout_flag = false;
 
                 // Log the request (direction: from thermostat/master)
@@ -607,7 +627,30 @@ bool opentherm_gateway_process(OpenTherm *ot, OpenThermMessage *request, OpenThe
             if (ot->status == OT_STATUS_GATEWAY_RESPONSE_READY) {
                 // Complete response captured from boiler
                 opentherm_disable_all_inputs(ot);
-                ot->gateway_response.data = ot->response;
+                uint32_t captured_frame = ot->response;
+                
+                // VALIDATION: Check parity and message type before accepting frame
+                // WHY: Noise can corrupt response frames too. Invalid responses should
+                // not be forwarded to the thermostat as this could confuse it.
+                if (!opentherm_check_parity(captured_frame)) {
+                    ESP_LOGW(TAG, "Gateway: Invalid parity in response frame 0x%08lX, discarding",
+                             (unsigned long)captured_frame);
+                    // Don't forward corrupted response - let thermostat timeout naturally
+                    // This is safer than forwarding garbage
+                    opentherm_prepare_receive(ot, OT_ROLE_MASTER);
+                    ot->gateway_state = OT_GATEWAY_STATE_WAITING_REQUEST;
+                    break;
+                }
+                
+                if (!opentherm_is_valid_response_type(captured_frame)) {
+                    ESP_LOGW(TAG, "Gateway: Invalid message type %d in response frame 0x%08lX, discarding",
+                             opentherm_get_message_type(captured_frame), (unsigned long)captured_frame);
+                    opentherm_prepare_receive(ot, OT_ROLE_MASTER);
+                    ot->gateway_state = OT_GATEWAY_STATE_WAITING_REQUEST;
+                    break;
+                }
+                
+                ot->gateway_response.data = captured_frame;
                 ot->gateway_timeout_flag = false;
 
                 // Log the response (direction: from boiler/slave)
@@ -734,6 +777,60 @@ bool opentherm_is_valid_response(uint32_t request, uint32_t response)
     uint8_t response_id = opentherm_get_data_id(response);
     
     return request_id == response_id;
+}
+
+/**
+ * Validate frame parity (even parity)
+ * 
+ * WHY: OpenTherm uses even parity - the total number of 1 bits in the 32-bit
+ * frame (including the parity bit at MSB) must be even. This catches single-bit
+ * errors and many noise-induced corruptions.
+ * 
+ * @return true if parity is valid (even number of 1s), false otherwise
+ */
+bool opentherm_check_parity(uint32_t frame)
+{
+    // Count 1 bits using Brian Kernighan's algorithm
+    uint32_t count = 0;
+    uint32_t n = frame;
+    while (n) {
+        n &= (n - 1);  // Clear the lowest set bit
+        count++;
+    }
+    // Even parity means total 1s should be even
+    return (count % 2) == 0;
+}
+
+/**
+ * Check if message type is valid for a master REQUEST
+ * 
+ * WHY: In OpenTherm protocol, message types 0-3 are used by the master (thermostat)
+ * for requests. Types 4-7 are slave (boiler) response types and should NEVER
+ * appear in a request. This helps reject noise that produces invalid type combinations.
+ * 
+ * Valid request types: READ_DATA(0), WRITE_DATA(1), INVALID_DATA(2), RESERVED(3)
+ */
+bool opentherm_is_valid_request_type(uint32_t frame)
+{
+    OpenThermMessageType type = opentherm_get_message_type(frame);
+    // Master request types are 0-3
+    return type <= OT_MSGTYPE_RESERVED;
+}
+
+/**
+ * Check if message type is valid for a slave RESPONSE
+ * 
+ * WHY: In OpenTherm protocol, message types 4-7 are used by the slave (boiler)
+ * for responses. Types 0-3 are master request types and should NEVER appear
+ * in a response from the boiler.
+ * 
+ * Valid response types: READ_ACK(4), WRITE_ACK(5), DATA_INVALID(6), UNKNOWN_DATAID(7)
+ */
+bool opentherm_is_valid_response_type(uint32_t frame)
+{
+    OpenThermMessageType type = opentherm_get_message_type(frame);
+    // Slave response types are 4-7
+    return type >= OT_MSGTYPE_READ_ACK;
 }
 
 // Message type to string

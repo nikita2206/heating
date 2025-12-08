@@ -3,6 +3,8 @@
  * 
  * Proxies OpenTherm messages between thermostat and boiler
  * while logging all communication via WebSocket for analysis.
+ * 
+ * Uses RMT peripheral for precise Manchester encoding/decoding.
  */
 
 #include <fcntl.h>
@@ -22,7 +24,7 @@
 #include "esp_event.h"
 #include "nvs_flash.h"
 #include "opentherm_gateway.h"
-#include "opentherm.h"
+#include "opentherm_rmt.h"
 #include "websocket_server.h"
 #include "ota_update.h"
 
@@ -35,7 +37,7 @@ static EventGroupHandle_t s_wifi_event_group;
 
 static int s_retry_num = 0;
 static websocket_server_t ws_server;
-static OpenTherm ot;
+static OpenThermRmt ot;
 
 /* Console initialization for USB Serial JTAG */
 #if CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG
@@ -141,8 +143,8 @@ static esp_err_t wifi_init_sta(void)
  * OpenTherm message callback - invoked for every captured frame
  * 
  * WHY: The gateway state machine calls this callback twice per transaction:
- *   1. When a thermostat REQUEST is captured (from_role = OT_ROLE_MASTER)
- *   2. When a boiler RESPONSE is captured (from_role = OT_ROLE_SLAVE)
+ *   1. When a thermostat REQUEST is captured (from_role = OT_RMT_ROLE_MASTER)
+ *   2. When a boiler RESPONSE is captured (from_role = OT_RMT_ROLE_SLAVE)
  * 
  * This provides real-time telemetry of all OpenTherm communication, critical for:
  *   - Debugging heating system issues
@@ -153,26 +155,26 @@ static esp_err_t wifi_init_sta(void)
  *   - Serial console (ESP_LOGI)
  *   - WebSocket clients (for remote monitoring via browser)
  */
-static void opentherm_message_callback(OpenTherm *ot_instance, OpenThermMessage *message, OpenThermRole from_role)
+static void opentherm_message_callback(OpenThermRmt *ot_instance, OpenThermRmtMessage *message, OpenThermRmtRole from_role)
 {
-    const char *direction = (from_role == OT_ROLE_MASTER) ? "REQUEST" : "RESPONSE";
-    OpenThermMessageType msg_type = opentherm_get_message_type(message->data);
-    uint8_t data_id = opentherm_get_data_id(message->data);
-    uint16_t data_value = opentherm_get_uint16(message->data);
+    const char *direction = (from_role == OT_RMT_ROLE_MASTER) ? "REQUEST" : "RESPONSE";
+    OpenThermRmtMessageType msg_type = opentherm_rmt_get_message_type(message->data);
+    uint8_t data_id = opentherm_rmt_get_data_id(message->data);
+    uint16_t data_value = opentherm_rmt_get_uint16(message->data);
     
     // Log to serial console for debugging
-    ESP_LOGI(TAG, "%s | Type: %s | ID: %d | Value: 0x%04X | Raw: 0x%08X",
+    ESP_LOGI(TAG, "%s | Type: %s | ID: %d | Value: 0x%04X | Raw: 0x%08lX",
              direction,
-             opentherm_message_type_to_string(msg_type),
+             opentherm_rmt_message_type_to_string(msg_type),
              data_id,
              data_value,
-             message->data);
+             (unsigned long)message->data);
     
     // Send to WebSocket clients for remote monitoring
     websocket_server_send_opentherm_message(&ws_server,
                                             direction,
                                             message->data,
-                                            opentherm_message_type_to_string(msg_type),
+                                            opentherm_rmt_message_type_to_string(msg_type),
                                             data_id,
                                             data_value);
 }
@@ -190,7 +192,7 @@ static void opentherm_message_callback(OpenTherm *ot_instance, OpenThermMessage 
  */
 static void opentherm_gateway_task(void *pvParameters)
 {
-    ESP_LOGI(TAG, "Starting OpenTherm gateway task");
+    ESP_LOGI(TAG, "Starting OpenTherm gateway task (RMT implementation)");
     
     // Wait for WiFi connection before starting (needed for WebSocket logging)
     EventBits_t bits = xEventGroupWaitBits(s_wifi_event_group,
@@ -221,25 +223,35 @@ static void opentherm_gateway_task(void *pvParameters)
     ESP_LOGI(TAG, "WebSocket server started. Connect to http://<device-ip>/ to view messages");
     ESP_LOGI(TAG, "OTA update available at POST http://<device-ip>/ota");
     
-    // Initialize OpenTherm gateway with dual interfaces
+    // Initialize OpenTherm gateway with dual interfaces using RMT
     // Master side connects to thermostat, slave side connects to boiler
-    opentherm_init_gateway(&ot,
-                          OT_MASTER_IN_PIN, OT_MASTER_OUT_PIN,  // Thermostat side
-                          OT_SLAVE_IN_PIN, OT_SLAVE_OUT_PIN);    // Boiler side
+    esp_err_t ret = opentherm_rmt_init_gateway(&ot,
+                                                OT_MASTER_IN_PIN, OT_MASTER_OUT_PIN,  // Thermostat side
+                                                OT_SLAVE_IN_PIN, OT_SLAVE_OUT_PIN);   // Boiler side
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to initialize OpenTherm RMT gateway: %s", esp_err_to_name(ret));
+        vTaskDelete(NULL);
+        return;
+    }
     
     // Register callback for logging each captured frame (both directions)
-    opentherm_set_message_callback(&ot, opentherm_message_callback, NULL);
-    opentherm_start(&ot);
-    opentherm_gateway_reset(&ot);  // Start in clean IDLE state
+    opentherm_rmt_set_message_callback(&ot, opentherm_message_callback, NULL);
     
-    // Enable/disable ISR debug logging (logs first 8 bits of each message to ring buffer)
-    opentherm_isr_debug_enable(&ot, false);
+    // Start the RMT channels
+    ret = opentherm_rmt_start(&ot);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to start OpenTherm RMT: %s", esp_err_to_name(ret));
+        vTaskDelete(NULL);
+        return;
+    }
     
-    ESP_LOGI(TAG, "OpenTherm gateway initialized and ready");
-    ESP_LOGI(TAG, "Thermostat side - IN: GPIO%d, OUT: GPIO%d", OT_MASTER_IN_PIN, OT_MASTER_OUT_PIN);
-    ESP_LOGI(TAG, "Boiler side - IN: GPIO%d, OUT: GPIO%d", OT_SLAVE_IN_PIN, OT_SLAVE_OUT_PIN);
+    opentherm_rmt_gateway_reset(&ot);  // Start in clean IDLE state
     
-    OpenThermMessage request, response;
+    ESP_LOGI(TAG, "OpenTherm RMT gateway initialized and ready");
+    ESP_LOGI(TAG, "Thermostat side - RX: GPIO%d, TX: GPIO%d", OT_MASTER_IN_PIN, OT_MASTER_OUT_PIN);
+    ESP_LOGI(TAG, "Boiler side - RX: GPIO%d, TX: GPIO%d", OT_SLAVE_IN_PIN, OT_SLAVE_OUT_PIN);
+    
+    OpenThermRmtMessage request, response;
     bool timeout_reported = false;
     const TickType_t loop_delay = pdMS_TO_TICKS(1);  // 1ms - fast enough to handle OpenTherm timing
     
@@ -249,34 +261,32 @@ static void opentherm_gateway_task(void *pvParameters)
     const uint32_t HEARTBEAT_INTERVAL = 5000;  // Send status every 5 seconds (5000 * 1ms)
     
     // Debug counter for hardware diagnostics
-    // WHY: Helps diagnose hardware connection issues by showing ISR activity
+    // WHY: Helps diagnose issues by showing RMT statistics
     uint32_t debug_counter = 0;
     const uint32_t DEBUG_INTERVAL = 10000;  // Log debug info every 10 seconds (10000 * 1ms)
-    uint32_t last_master_edges = 0;
-    uint32_t last_slave_edges = 0;
+    uint32_t last_tx_count = 0;
+    uint32_t last_rx_count = 0;
+    uint32_t last_error_count = 0;
     
     // Main gateway loop - drives the state machine continuously
     // WHY 1ms loop: OpenTherm frames take ~34ms to transmit. A 1ms loop ensures
     // we check for frame completion and state transitions frequently enough to
     // meet the 800ms response timeout while keeping CPU usage reasonable.
     while (1) {
-        // Flush ISR debug buffer to logs (does nothing if debug is disabled)
-        opentherm_isr_debug_flush(&ot);
-        
         // Process one state machine iteration
-        bool proxied = opentherm_gateway_process(&ot, &request, &response);
+        bool proxied = opentherm_rmt_gateway_process(&ot, &request, &response);
 
         if (proxied) {
             // Complete request->response transaction proxied
             // Validate that response data ID matches request (OpenTherm requirement)
-            if (!opentherm_is_valid_response(request.data, response.data)) {
-                ESP_LOGW(TAG, "Gateway forwarded request 0x%08X but response ID mismatch (0x%08X)",
-                         request.data, response.data);
+            if (!opentherm_rmt_is_valid_response(request.data, response.data)) {
+                ESP_LOGW(TAG, "Gateway forwarded request 0x%08lX but response ID mismatch (0x%08lX)",
+                         (unsigned long)request.data, (unsigned long)response.data);
                 websocket_server_send_text(&ws_server,
                                            "OT Gateway warning: response data ID mismatch");
             } else {
-                ESP_LOGI(TAG, "Gateway proxied request 0x%08X -> response 0x%08X",
-                         request.data, response.data);
+                ESP_LOGI(TAG, "Gateway proxied request 0x%08lX -> response 0x%08lX",
+                         (unsigned long)request.data, (unsigned long)response.data);
             }
         }
 
@@ -291,31 +301,33 @@ static void opentherm_gateway_task(void *pvParameters)
             timeout_reported = false;
         }
 
-        // Hardware diagnostics: log detailed state info periodically
-        // WHY: Helps debug hardware connection issues by showing if ISR is firing,
-        // what state the gateway is in, and which pins are active
+        // Hardware diagnostics: log RMT statistics periodically
+        // WHY: Helps diagnose communication issues by showing TX/RX/error counts
         debug_counter++;
         if (debug_counter >= DEBUG_INTERVAL) {
             debug_counter = 0;
-            uint32_t master_edges_delta = ot.isr_edge_count_master - last_master_edges;
-            uint32_t slave_edges_delta = ot.isr_edge_count_slave - last_slave_edges;
-            last_master_edges = ot.isr_edge_count_master;
-            last_slave_edges = ot.isr_edge_count_slave;
+            uint32_t tx_delta = ot.tx_count - last_tx_count;
+            uint32_t rx_delta = ot.rx_count - last_rx_count;
+            uint32_t error_delta = ot.error_count - last_error_count;
+            last_tx_count = ot.tx_count;
+            last_rx_count = ot.rx_count;
+            last_error_count = ot.error_count;
             
-            ESP_LOGI(TAG, "DEBUG: status=%d, state=%d, rx_pin=%d, rx_role=%d, bit_idx=%d",
-                     ot.status, ot.gateway_state, ot.current_receive_pin, 
-                     ot.current_receive_role, ot.response_bit_index);
-            ESP_LOGI(TAG, "DEBUG: ISR edges (last 10s): master=%lu (+%lu), slave=%lu (+%lu)",
-                     (unsigned long)ot.isr_edge_count_master, (unsigned long)master_edges_delta,
-                     (unsigned long)ot.isr_edge_count_slave, (unsigned long)slave_edges_delta);
+            ESP_LOGI(TAG, "DEBUG: status=%s, state=%d",
+                     opentherm_rmt_status_to_string(ot.status), ot.gateway_state);
+            ESP_LOGI(TAG, "DEBUG: RMT stats (last 10s): TX=%lu (+%lu), RX=%lu (+%lu), errors=%lu (+%lu), timeouts=%lu",
+                     (unsigned long)ot.tx_count, (unsigned long)tx_delta,
+                     (unsigned long)ot.rx_count, (unsigned long)rx_delta,
+                     (unsigned long)ot.error_count, (unsigned long)error_delta,
+                     (unsigned long)ot.timeout_count);
             
-            // If no edges detected at all, alert about possible hardware issue
-            if (ot.isr_edge_count_master == 0 && ot.isr_edge_count_slave == 0) {
-                ESP_LOGW(TAG, "DEBUG: NO ISR ACTIVITY DETECTED - Check hardware connections!");
+            // If no activity detected at all, alert about possible hardware issue
+            if (ot.tx_count == 0 && ot.rx_count == 0) {
+                ESP_LOGW(TAG, "DEBUG: NO RMT ACTIVITY DETECTED - Check hardware connections!");
                 websocket_server_send_text(&ws_server,
-                    "WARNING: No GPIO activity detected on either interface. Check hardware!");
-            } else if (master_edges_delta == 0 && slave_edges_delta == 0) {
-                ESP_LOGW(TAG, "DEBUG: No new edges in last 10s - possible idle period or connection issue");
+                    "WARNING: No RMT activity detected on either interface. Check hardware!");
+            } else if (tx_delta == 0 && rx_delta == 0) {
+                ESP_LOGW(TAG, "DEBUG: No new TX/RX in last 10s - possible idle period or connection issue");
             }
         }
         
@@ -327,9 +339,11 @@ static void opentherm_gateway_task(void *pvParameters)
             heartbeat_counter = 0;
             char status_msg[128];
             snprintf(status_msg, sizeof(status_msg),
-                     "Gateway status: %s | Uptime: %llu seconds",
+                     "Gateway status: %s | Uptime: %llu seconds | TX: %lu | RX: %lu",
                      ot.gateway_timeout_flag ? "TIMEOUT" : "OK",
-                     (unsigned long long)(esp_timer_get_time() / 1000000));
+                     (unsigned long long)(esp_timer_get_time() / 1000000),
+                     (unsigned long)ot.tx_count,
+                     (unsigned long)ot.rx_count);
             websocket_server_send_text(&ws_server, status_msg);
         }
 
@@ -341,7 +355,7 @@ static void opentherm_gateway_task(void *pvParameters)
 
 void app_main(void)
 {
-    ESP_LOGI(TAG, "OpenTherm Gateway starting...");
+    ESP_LOGI(TAG, "OpenTherm Gateway starting (RMT implementation)...");
     ESP_LOGI(TAG, "Firmware version: %s", ota_update_get_version());
     
     // Validate OTA state early - handles rollback verification
@@ -376,4 +390,3 @@ void app_main(void)
     
     ESP_LOGI(TAG, "OpenTherm Gateway initialized");
 }
-

@@ -162,6 +162,9 @@ int8_t opentherm_get_int8(uint32_t message);
 
 // Utility functions
 bool opentherm_is_valid_response(uint32_t request, uint32_t response);
+bool opentherm_check_parity(uint32_t frame);
+bool opentherm_is_valid_request_type(uint32_t frame);
+bool opentherm_is_valid_response_type(uint32_t frame);
 const char* opentherm_message_type_to_string(OpenThermMessageType type);
 const char* opentherm_status_to_string(OpenThermStatus status);
 
