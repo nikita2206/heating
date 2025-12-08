@@ -9,6 +9,7 @@
 #include "boiler_manager.h"
 #include "opentherm_gateway.h"
 #include "opentherm_rmt.h"
+#include "mqtt_bridge.h"
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -64,24 +65,34 @@ static const char *dashboard_page =
     ".stat-label{font-size:12px;color:var(--muted);margin-top:4px}"
     "</style></head><body>"
     "<nav><a href='/' class='logo'><svg viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2'><path d='M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5'/></svg>OT Gateway</a>"
-    "<div class='nav-links'><a href='/' class='active'>Dashboard</a><a href='/logs'>Logs</a><a href='/diagnostics'>Diagnostics</a><a href='/ota'>OTA Update</a></div></nav>"
+    "<div class='nav-links'><a href='/' class='active'>Dashboard</a><a href='/logs'>Logs</a><a href='/diagnostics'>Diagnostics</a><a href='/mqtt'>MQTT</a><a href='/ota'>OTA Update</a></div></nav>"
     "<div class='hero'><h1>OpenTherm Gateway</h1><p class='subtitle'>Monitor and manage your heating system</p>"
     "<div class='stats'><div class='stat'><div class='stat-value' id='uptime'>--</div><div class='stat-label'>Uptime</div></div>"
     "<div class='stat'><div class='stat-value' id='version'>--</div><div class='stat-label'>Firmware</div></div>"
-    "<div class='stat'><div class='stat-value' id='partition'>--</div><div class='stat-label'>Partition</div></div></div></div>"
+    "<div class='stat'><div class='stat-value' id='partition'>--</div><div class='stat-label'>Partition</div></div>"
+    "<div class='stat'><div class='stat-value' id='mqtt-status'>--</div><div class='stat-label'>MQTT</div></div>"
+    "<div class='stat'><div class='stat-value' id='mqtt-tset'>--</div><div class='stat-label'>MQTT TSet</div></div></div></div>"
     "<div class='container'><div class='grid'>"
     "<a href='/logs' class='feature-card'><div class='feature-icon logs'>📊</div><h3>Live Logs</h3><p>Monitor OpenTherm messages in real-time. View requests and responses between your thermostat and boiler.</p></a>"
     "<a href='/diagnostics' class='feature-card'><div class='feature-icon' style='background:linear-gradient(135deg,#f59e0b,#d97706)'>🔧</div><h3>Diagnostics</h3><p>View real-time boiler diagnostics including temperatures, pressures, and system status.</p></a>"
     "<a href='/write' class='feature-card'><div class='feature-icon' style='background:linear-gradient(135deg,var(--accent2),#6d28d9)'>✏️</div><h3>Manual Write</h3><p>Send WRITE_DATA frames directly to the boiler. Manually control setpoints and other writable parameters.</p></a>"
     "<a href='/ota' class='feature-card'><div class='feature-icon ota'>⬆️</div><h3>OTA Update</h3><p>Upload new firmware over-the-air. View current version, manage rollbacks, and update safely.</p></a>"
     "</div></div>"
-    "<script>fetch('/ota/status').then(r=>r.json()).then(d=>{"
+    "<script>"
+    "function refreshOta(){fetch('/ota/status').then(r=>r.json()).then(d=>{"
     "document.getElementById('version').textContent=d.version;"
     "document.getElementById('partition').textContent=d.running_partition;"
-    "}).catch(()=>{});"
-    "setInterval(()=>{fetch('/ota/status').then(r=>r.json()).then(d=>{"
     "let t=d.compile_time.split(' ');document.getElementById('uptime').textContent=t[0];"
-    "}).catch(()=>{});},30000);</script></body></html>";
+    "}).catch(()=>{});}"
+    "function refreshMqtt(){fetch('/api/mqtt_state').then(r=>r.json()).then(d=>{"
+    "document.getElementById('mqtt-status').textContent=d.connected?'Connected':'Offline';"
+    "if(d.last_tset_valid){document.getElementById('mqtt-tset').textContent=d.last_tset.toFixed(1)+'°C';}"
+    "else{document.getElementById('mqtt-tset').textContent='--';}"
+    "}).catch(()=>{document.getElementById('mqtt-status').textContent='Offline';});}"
+    "refreshOta();refreshMqtt();"
+    "setInterval(refreshOta,30000);"
+    "setInterval(refreshMqtt,5000);"
+    "</script></body></html>";
 
 // Logs page (moved from root)
 static const char *logs_page = 
@@ -106,7 +117,7 @@ static const char *logs_page =
     ".msg-count{color:var(--muted);font-size:13px;margin-left:auto}"
     "</style></head><body>"
     "<nav><a href='/' class='logo'><svg viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2'><path d='M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5'/></svg>OT Gateway</a>"
-    "<div class='nav-links'><a href='/'>Dashboard</a><a href='/logs'>Logs</a><a href='/diagnostics'>Diagnostics</a><a href='/write'>Manual Write</a><a href='/ota'>OTA Update</a></div></nav>"
+    "<div class='nav-links'><a href='/'>Dashboard</a><a href='/logs'>Logs</a><a href='/diagnostics'>Diagnostics</a><a href='/mqtt'>MQTT</a><a href='/write'>Manual Write</a><a href='/ota'>OTA Update</a></div></nav>"
     "<div class='container'><h1>Live Logs</h1><p class='subtitle'>Real-time OpenTherm message monitor</p>"
     "<div class='card'><div class='toolbar'>"
     "<div class='status-indicator'><div class='status-dot' id='status-dot'></div><span id='status-text'>Disconnected</span></div>"
@@ -176,7 +187,7 @@ static const char *diagnostics_page =
     ".all-values-table tr:hover{background:var(--card-hover)}"
     "</style></head><body>"
     "<nav><a href='/' class='logo'><svg viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2'><path d='M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5'/></svg>OT Gateway</a>"
-    "<div class='nav-links'><a href='/'>Dashboard</a><a href='/logs'>Logs</a><a href='/diagnostics'>Diagnostics</a><a href='/write' class='active'>Manual Write</a><a href='/ota'>OTA Update</a></div></nav>"
+    "<div class='nav-links'><a href='/'>Dashboard</a><a href='/logs'>Logs</a><a href='/diagnostics'>Diagnostics</a><a href='/mqtt'>MQTT</a><a href='/write' class='active'>Manual Write</a><a href='/ota'>OTA Update</a></div></nav>"
     "<div class='container'><h1>Boiler Diagnostics</h1><p class='subtitle'>Real-time boiler state monitoring</p>"
     "<div class='section-title'>Temperatures</div>"
     "<div class='diagnostics-grid' id='temps'></div>"
@@ -260,6 +271,62 @@ static const char *diagnostics_page =
     "updateDiagnostics();setInterval(updateDiagnostics,2000);"
     "</script></body></html>";
 
+// MQTT config page
+static const char *mqtt_page =
+    "<!DOCTYPE html><html><head><meta charset='UTF-8'><meta name='viewport' content='width=device-width,initial-scale=1'>"
+    "<title>MQTT - OpenTherm Gateway</title><style>%s"
+    ".form-group{margin-bottom:16px}"
+    ".form-label{display:block;color:var(--text);font-size:14px;font-weight:500;margin-bottom:6px}"
+    ".form-input{padding:10px 12px;border:1px solid var(--border);border-radius:8px;background:var(--bg);color:var(--text);font-size:14px;font-family:inherit;width:100%%;box-sizing:border-box}"
+    ".form-input:focus{outline:none;border-color:var(--accent)}"
+    ".form-switch{display:flex;align-items:center;gap:8px;margin-bottom:12px}"
+    ".status-chip{display:inline-flex;align-items:center;gap:8px;padding:6px 10px;border-radius:999px;font-size:12px;border:1px solid var(--border)}"
+    ".status-chip.ok{color:var(--accent);border-color:var(--accent)}"
+    ".status-chip.bad{color:#ef4444;border-color:#ef4444}"
+    ".card small{color:var(--muted)}"
+    "</style></head><body>"
+    "<nav><a href='/' class='logo'><svg viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2'><path d='M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5'/></svg>OT Gateway</a>"
+    "<div class='nav-links'><a href='/'>Dashboard</a><a href='/logs'>Logs</a><a href='/diagnostics'>Diagnostics</a><a href='/mqtt' class='active'>MQTT</a><a href='/write'>Manual Write</a><a href='/ota'>OTA Update</a></div></nav>"
+    "<div class='container'><h1>MQTT Overrides</h1><p class='subtitle'>Configure broker and topics for external overrides</p>"
+    "<div class='card'><div class='status-chip' id='mqtt-chip'>--</div>"
+    "<form id='mqtt-form'>"
+    "<label class='form-switch'><input type='checkbox' id='enable'> <span>Enable MQTT bridge</span></label>"
+    "<div class='form-group'><label class='form-label'>Broker URI</label><input class='form-input' id='broker_uri' placeholder='mqtt://host:1883'></div>"
+    "<div class='form-group'><label class='form-label'>Client ID</label><input class='form-input' id='client_id' placeholder='ot-gateway'></div>"
+    "<div class='form-group'><label class='form-label'>Username</label><input class='form-input' id='username' placeholder='(optional)'></div>"
+    "<div class='form-group'><label class='form-label'>Password</label><input class='form-input' id='password' type='password' placeholder='(optional)'></div>"
+    "<div class='form-group'><label class='form-label'>Base Topic</label><input class='form-input' id='base_topic' placeholder='ot_gateway'></div>"
+    "<div class='form-group'><label class='form-label'>Discovery Prefix</label><input class='form-input' id='discovery_prefix' placeholder='homeassistant'></div>"
+    "<button type='submit' class='btn btn-primary'>Save & Restart MQTT</button>"
+    "<small>Changes are stored in NVS and applied immediately.</small>"
+    "</form></div></div>"
+    "<script>"
+    "function loadConfig(){fetch('/api/mqtt_config').then(r=>r.json()).then(d=>{"
+    "document.getElementById('enable').checked=d.enable;"
+    "document.getElementById('broker_uri').value=d.broker_uri||'';"
+    "document.getElementById('client_id').value=d.client_id||'';"
+    "document.getElementById('username').value=d.username||'';"
+    "document.getElementById('discovery_prefix').value=d.discovery_prefix||'homeassistant';"
+    "document.getElementById('base_topic').value=d.base_topic||'';"
+    "const chip=document.getElementById('mqtt-chip');"
+    "if(d.connected){chip.textContent='Connected';chip.className='status-chip ok';}"
+    "else{chip.textContent='Offline';chip.className='status-chip bad';}"
+    "}).catch(()=>{});}"
+    "document.getElementById('mqtt-form').addEventListener('submit',function(e){"
+    "e.preventDefault();"
+    "let params=new URLSearchParams();"
+    "params.append('enable',document.getElementById('enable').checked?'on':'off');"
+    "params.append('broker_uri',document.getElementById('broker_uri').value);"
+    "params.append('client_id',document.getElementById('client_id').value);"
+    "params.append('username',document.getElementById('username').value);"
+    "params.append('password',document.getElementById('password').value);"
+    "params.append('base_topic',document.getElementById('base_topic').value);"
+    "fetch('/api/mqtt_config',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:params.toString()})"
+    ".then(r=>r.json()).then(()=>{loadConfig();alert('Saved and restarted');}).catch(()=>alert('Failed to save'))"
+    "});"
+    "loadConfig();"
+    "</script></body></html>";
+
 // Manual write page HTML
 static const char *write_page = 
     "<!DOCTYPE html><html><head><meta charset='UTF-8'><meta name='viewport' content='width=device-width,initial-scale=1'>"
@@ -278,7 +345,7 @@ static const char *write_page =
     ".preset-btn:hover{background:var(--border);border-color:var(--accent)}"
     "</style></head><body>"
     "<nav><a href='/' class='logo'><svg viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2'><path d='M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5'/></svg>OT Gateway</a>"
-    "<div class='nav-links'><a href='/'>Dashboard</a><a href='/logs'>Logs</a><a href='/diagnostics'>Diagnostics</a><a href='/write' class='active'>Manual Write</a><a href='/ota'>OTA Update</a></div></nav>"
+    "<div class='nav-links'><a href='/'>Dashboard</a><a href='/logs'>Logs</a><a href='/diagnostics'>Diagnostics</a><a href='/mqtt'>MQTT</a><a href='/write' class='active'>Manual Write</a><a href='/ota'>OTA Update</a></div></nav>"
     "<div class='container'><h1>Manual WRITE_DATA Frame</h1><p class='subtitle'>Send WRITE_DATA frames directly to the boiler</p>"
     "<div class='card'><div class='preset-buttons'>"
     "<button class='preset-btn' onclick='setPreset(1,\"float\",20.0)'>TSet (20°C)</button>"
@@ -374,6 +441,131 @@ static esp_err_t write_handler(httpd_req_t *req)
     return httpd_resp_send_500(req);
 }
 
+// MQTT state API
+static esp_err_t mqtt_state_handler(httpd_req_t *req)
+{
+    mqtt_bridge_state_t st = {0};
+    mqtt_bridge_get_state(&st);
+    char buf[256];
+    int len = snprintf(buf, sizeof(buf),
+        "{\"connected\":%s,\"last_tset_valid\":%s,\"last_tset\":%.2f,"
+        "\"last_ch_enable_valid\":%s,\"last_ch_enable\":%s,\"last_update_ms\":%lld}",
+        st.connected ? "true" : "false",
+        st.last_tset_valid ? "true" : "false",
+        st.last_tset_c,
+        st.last_ch_enable_valid ? "true" : "false",
+        st.last_ch_enable ? "true" : "false",
+        (long long)st.last_update_ms);
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_send(req, buf, len);
+    return ESP_OK;
+}
+
+// MQTT config API (GET/POST form-urlencoded)
+static bool read_req_body(httpd_req_t *req, char *buf, size_t max)
+{
+    size_t off = 0;
+    while (off < max - 1) {
+        int ret = httpd_req_recv(req, buf + off, max - 1 - off);
+        if (ret <= 0) break;
+        off += ret;
+        if (off >= req->content_len) break;
+    }
+    buf[off] = 0;
+    return true;
+}
+
+static void url_decode(char *s)
+{
+    char *src = s, *dst = s;
+    while (*src) {
+        if (*src == '%' && src[1] && src[2]) {
+            char hex[3] = { src[1], src[2], 0 };
+            *dst++ = (char)strtol(hex, NULL, 16);
+            src += 3;
+        } else if (*src == '+') {
+            *dst++ = ' ';
+            src++;
+        } else {
+            *dst++ = *src++;
+        }
+    }
+    *dst = 0;
+}
+
+static void parse_form_kv(const char *body, const char *key, char *out, size_t out_sz)
+{
+    const char *p = body;
+    size_t key_len = strlen(key);
+    while (p && *p) {
+        const char *eq = strchr(p, '=');
+        if (!eq) break;
+        const char *amp = strchr(eq, '&');
+        size_t this_key_len = (size_t)(eq - p);
+        if (this_key_len == key_len && strncmp(p, key, key_len) == 0) {
+            size_t val_len = amp ? (size_t)(amp - eq - 1) : strlen(eq + 1);
+            if (val_len >= out_sz) val_len = out_sz - 1;
+            memcpy(out, eq + 1, val_len);
+            out[val_len] = 0;
+            url_decode(out);
+            return;
+        }
+        if (!amp) break;
+        p = amp + 1;
+    }
+    if (out_sz) out[0] = 0;
+}
+
+static esp_err_t mqtt_config_get_handler(httpd_req_t *req)
+{
+    mqtt_bridge_config_t cfg;
+    mqtt_bridge_load_config(&cfg);
+    mqtt_bridge_state_t st = {0};
+    mqtt_bridge_get_state(&st);
+
+    char buf[512];
+    int len = snprintf(buf, sizeof(buf),
+        "{\"enable\":%s,\"broker_uri\":\"%s\",\"client_id\":\"%s\","
+        "\"username\":\"%s\",\"base_topic\":\"%s\",\"discovery_prefix\":\"%s\",\"connected\":%s}",
+        cfg.enable ? "true" : "false",
+        cfg.broker_uri,
+        cfg.client_id,
+        cfg.username,
+        cfg.base_topic,
+        cfg.discovery_prefix,
+        st.connected ? "true" : "false");
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_send(req, buf, len);
+    return ESP_OK;
+}
+
+static esp_err_t mqtt_config_post_handler(httpd_req_t *req)
+{
+    char body[512];
+    read_req_body(req, body, sizeof(body));
+
+    mqtt_bridge_config_t cfg;
+    mqtt_bridge_load_config(&cfg);
+
+    char val[128];
+    parse_form_kv(body, "enable", val, sizeof(val));
+    if (val[0]) cfg.enable = (strcmp(val, "on") == 0 || strcmp(val, "1") == 0 || strcasecmp(val, "true") == 0);
+
+    parse_form_kv(body, "broker_uri", cfg.broker_uri, sizeof(cfg.broker_uri));
+    parse_form_kv(body, "client_id", cfg.client_id, sizeof(cfg.client_id));
+    parse_form_kv(body, "username", cfg.username, sizeof(cfg.username));
+    parse_form_kv(body, "password", cfg.password, sizeof(cfg.password));
+    parse_form_kv(body, "base_topic", cfg.base_topic, sizeof(cfg.base_topic));
+    parse_form_kv(body, "discovery_prefix", cfg.discovery_prefix, sizeof(cfg.discovery_prefix));
+
+    mqtt_bridge_save_config(&cfg);
+    mqtt_bridge_start(&cfg, NULL);
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, "{\"status\":\"ok\"}");
+    return ESP_OK;
+}
+
 // HTTP GET handler for diagnostics page
 static esp_err_t diagnostics_handler(httpd_req_t *req)
 {
@@ -381,6 +573,20 @@ static esp_err_t diagnostics_handler(httpd_req_t *req)
     char *page = malloc(16384);
     if (page) {
         snprintf(page, 16384, diagnostics_page, common_styles);
+        httpd_resp_send(req, page, strlen(page));
+        free(page);
+        return ESP_OK;
+    }
+    return httpd_resp_send_500(req);
+}
+
+// MQTT config page handler
+static esp_err_t mqtt_page_handler(httpd_req_t *req)
+{
+    httpd_resp_set_type(req, "text/html");
+    char *page = malloc(8192);
+    if (page) {
+        snprintf(page, 8192, mqtt_page, common_styles);
         httpd_resp_send(req, page, strlen(page));
         free(page);
         return ESP_OK;
@@ -718,6 +924,15 @@ esp_err_t websocket_server_start(websocket_server_t *ws_server)
         .user_ctx = NULL
     };
     httpd_register_uri_handler(ws_server->server, &diagnostics_uri);
+
+    // Register MQTT config page handler
+    httpd_uri_t mqtt_uri = {
+        .uri = "/mqtt",
+        .method = HTTP_GET,
+        .handler = mqtt_page_handler,
+        .user_ctx = NULL
+    };
+    httpd_register_uri_handler(ws_server->server, &mqtt_uri);
     
     // Register write page handler
     httpd_uri_t write_uri = {
@@ -736,6 +951,31 @@ esp_err_t websocket_server_start(websocket_server_t *ws_server)
         .user_ctx = NULL
     };
     httpd_register_uri_handler(ws_server->server, &diagnostics_api_uri);
+
+    // Register MQTT state API handler
+    httpd_uri_t mqtt_state_uri = {
+        .uri = "/api/mqtt_state",
+        .method = HTTP_GET,
+        .handler = mqtt_state_handler,
+        .user_ctx = NULL
+    };
+    httpd_register_uri_handler(ws_server->server, &mqtt_state_uri);
+
+    // Register MQTT config API handlers
+    httpd_uri_t mqtt_cfg_get_uri = {
+        .uri = "/api/mqtt_config",
+        .method = HTTP_GET,
+        .handler = mqtt_config_get_handler,
+        .user_ctx = NULL
+    };
+    httpd_uri_t mqtt_cfg_post_uri = {
+        .uri = "/api/mqtt_config",
+        .method = HTTP_POST,
+        .handler = mqtt_config_post_handler,
+        .user_ctx = NULL
+    };
+    httpd_register_uri_handler(ws_server->server, &mqtt_cfg_get_uri);
+    httpd_register_uri_handler(ws_server->server, &mqtt_cfg_post_uri);
     
     // Register manual write API handler
     httpd_uri_t write_api_uri = {

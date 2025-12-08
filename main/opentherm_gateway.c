@@ -28,6 +28,8 @@
 #include "websocket_server.h"
 #include "ota_update.h"
 #include "boiler_manager.h"
+#include "mqtt_bridge.h"
+#include "sdkconfig.h"
 
 static const char *TAG = "OT_GATEWAY";
 
@@ -40,6 +42,7 @@ static int s_retry_num = 0;
 static websocket_server_t ws_server;
 static OpenThermRmt ot;
 static boiler_manager_t boiler_mgr;
+static mqtt_bridge_state_t mqtt_state;
 
 // Getter for boiler manager (for HTTP handlers)
 struct boiler_manager* opentherm_gateway_get_boiler_manager(void)
@@ -215,6 +218,14 @@ static void opentherm_gateway_task(void *pvParameters)
         return;
     }
     
+    // Start MQTT bridge (listen for overrides; no writes to boiler yet)
+    mqtt_bridge_config_t mqtt_cfg;
+    mqtt_bridge_load_config(&mqtt_cfg);
+    esp_err_t mqtt_ret = mqtt_bridge_start(&mqtt_cfg, &mqtt_state);
+    if (mqtt_ret != ESP_OK) {
+        ESP_LOGW(TAG, "MQTT bridge not started: %s", esp_err_to_name(mqtt_ret));
+    }
+
     // Start WebSocket server for real-time message monitoring
     if (websocket_server_start(&ws_server) != ESP_OK) {
         ESP_LOGE(TAG, "Failed to start WebSocket server");
