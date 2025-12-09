@@ -308,6 +308,9 @@ static void opentherm_gateway_task(void *pvParameters)
         // Process one state machine iteration
         bool proxied = opentherm_rmt_gateway_process(&ot, &request, &response);
 
+        // Boiler manager periodic work (control mode, etc.)
+        boiler_manager_process(&boiler_mgr, &request, &response);
+
         if (proxied) {
             // Complete request->response transaction proxied
             // Validate that response data ID matches request (OpenTherm requirement)

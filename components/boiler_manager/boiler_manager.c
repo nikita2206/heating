@@ -6,9 +6,14 @@
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "esp_err.h"
+#include "mqtt_bridge.h"
 #include <string.h>
 
 static const char *TAG = "BoilerManager";
+
+#define CONTROL_APPLY_INTERVAL_MS 5000
+#define CONTROL_MQTT_STALE_MS 45000
+#define CONTROL_DIAG_INTERVAL_MS 1000
 
 // Diagnostic command list - rotation order
 static const boiler_diagnostic_cmd_t diag_commands[] = {
@@ -53,6 +58,80 @@ static void update_diagnostic_value(boiler_diagnostic_value_t *dv, float value, 
     dv->valid = valid;
 }
 
+static void publish_diag_value(const char *id, const char *name, const char *unit, const boiler_diagnostic_value_t *dv)
+{
+    if (!dv) return;
+    mqtt_bridge_publish_sensor(id, name, unit, dv->value, dv->valid);
+}
+
+static uint16_t float_to_f88(float val)
+{
+    if (val < 0) val = 0;
+    if (val > 250.0f) val = 250.0f; // safety clamp
+    return (uint16_t)(val * 256.0f);
+}
+
+static uint16_t build_status_word(bool ch_on)
+{
+    uint16_t status = 0;
+    if (ch_on) {
+        status |= (1 << 0); // CH enabled (master config bit)
+        status |= (1 << 1); // DHW enable (keep on to avoid disabling DHW inadvertently)
+    }
+    // leave other bits zero
+    return status;
+}
+
+static bool refresh_control_state(boiler_manager_t *bm)
+{
+    if (!bm) return false;
+    mqtt_bridge_state_t mqtt = {0};
+    mqtt_bridge_get_state(&mqtt);
+
+    if (mqtt.last_tset_valid) {
+        bm->demand_tset_c = mqtt.last_tset_c;
+        bm->last_demand_ms = mqtt.last_override_ms;
+    }
+    if (mqtt.last_ch_enable_valid) {
+        bm->demand_ch_enabled = mqtt.last_ch_enable;
+        bm->last_demand_ms = mqtt.last_override_ms;
+    }
+
+    bool mqtt_ok = mqtt.available;
+    bm->control_active = bm->control_enabled && mqtt_ok;
+    bm->fallback_active = bm->control_enabled && !mqtt_ok;
+    return mqtt_ok;
+}
+
+static void parse_diagnostic_response(boiler_manager_t *bm, uint8_t data_id, uint32_t response);
+
+static void poll_next_diag(boiler_manager_t *bm)
+{
+    if (!bm || !bm->ot_instance) return;
+    const boiler_diagnostic_cmd_t *cmd = &bm->diag_commands[bm->diag_commands_index];
+    bm->diag_commands_index = (bm->diag_commands_index + 1) % bm->diag_commands_count;
+
+    OpenThermRmtMessage diag_request;
+    diag_request.data = opentherm_rmt_build_request(OT_RMT_MSGTYPE_READ_DATA, cmd->data_id, 0);
+
+    esp_err_t ret = opentherm_rmt_send_frame(bm->ot_instance, diag_request.data,
+                                              &bm->ot_instance->secondary);
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "Failed to send diagnostic command: %s", esp_err_to_name(ret));
+        return;
+    }
+
+    uint32_t diag_response_frame = 0;
+    ret = opentherm_rmt_receive_frame(bm->ot_instance, &bm->ot_instance->secondary, &diag_response_frame, 800);
+    if (ret == ESP_OK) {
+        if (opentherm_rmt_check_parity(diag_response_frame) &&
+            opentherm_rmt_is_valid_response_type(diag_response_frame) &&
+            opentherm_rmt_get_data_id(diag_response_frame) == cmd->data_id) {
+            parse_diagnostic_response(bm, cmd->data_id, diag_response_frame);
+        }
+    }
+}
+
 // Parse diagnostic response based on data ID
 static void parse_diagnostic_response(boiler_manager_t *bm, uint8_t data_id, uint32_t response)
 {
@@ -65,10 +144,12 @@ static void parse_diagnostic_response(boiler_manager_t *bm, uint8_t data_id, uin
         case 25:  // Tboiler
             float_val = opentherm_rmt_get_float(response);
             update_diagnostic_value(&bm->diagnostics.t_boiler, float_val, float_val > 0);
+            publish_diag_value("tboiler", "Boiler Temperature", "°C", &bm->diagnostics.t_boiler);
             break;
         case 28:  // Tret
             float_val = opentherm_rmt_get_float(response);
             update_diagnostic_value(&bm->diagnostics.t_return, float_val, true);
+            publish_diag_value("treturn", "Return Temperature", "°C", &bm->diagnostics.t_return);
             break;
         case 26:  // Tdhw
             float_val = opentherm_rmt_get_float(response);
@@ -85,6 +166,7 @@ static void parse_diagnostic_response(boiler_manager_t *bm, uint8_t data_id, uin
         case 33:  // Texhaust
             float_val = (float)opentherm_rmt_get_int8(response);
             update_diagnostic_value(&bm->diagnostics.t_exhaust, float_val, float_val > -40 && float_val < 500);
+            publish_diag_value("texhaust", "Exhaust Temperature", "°C", &bm->diagnostics.t_exhaust);
             break;
         case 34:  // TboilerHeatExchanger
             float_val = (float)opentherm_rmt_get_int8(response);
@@ -105,16 +187,19 @@ static void parse_diagnostic_response(boiler_manager_t *bm, uint8_t data_id, uin
         case 1:   // TSet (Control Setpoint - CH water temperature setpoint)
             float_val = opentherm_rmt_get_float(response);
             update_diagnostic_value(&bm->diagnostics.t_setpoint, float_val, float_val > 0 && float_val < 100);
+            publish_diag_value("tset", "Boiler Setpoint", "°C", &bm->diagnostics.t_setpoint);
             break;
             
         // Status readings
         case 17:  // RelModLevel
             float_val = opentherm_rmt_get_float(response);
             update_diagnostic_value(&bm->diagnostics.modulation_level, float_val, float_val >= 0 && float_val <= 100);
+            publish_diag_value("modulation", "Modulation Level", "%", &bm->diagnostics.modulation_level);
             break;
         case 18:  // CHPressure
             float_val = opentherm_rmt_get_float(response);
             update_diagnostic_value(&bm->diagnostics.pressure, float_val, float_val >= 0);
+            publish_diag_value("pressure", "CH Pressure", "bar", &bm->diagnostics.pressure);
             break;
         case 19:  // DHWFlowRate
             float_val = opentherm_rmt_get_float(response);
@@ -125,6 +210,7 @@ static void parse_diagnostic_response(boiler_manager_t *bm, uint8_t data_id, uin
         case 5:   // ASFflags
             uint8_val = opentherm_rmt_get_uint8_lb(response);
             update_diagnostic_value(&bm->diagnostics.fault_code, (float)uint8_val, true);
+            publish_diag_value("fault", "Fault Code", "", &bm->diagnostics.fault_code);
             break;
         case 115: // OEMDiagnosticCode
             uint16_val = opentherm_rmt_get_uint16(response);
@@ -211,6 +297,9 @@ esp_err_t boiler_manager_init(boiler_manager_t *bm, boiler_manager_mode_t mode, 
     
     memset(bm, 0, sizeof(boiler_manager_t));
     bm->mode = mode;
+    bm->control_enabled = (mode == BOILER_MANAGER_MODE_CONTROL);
+    bm->control_active = false;
+    bm->fallback_active = false;
     bm->ot_instance = ot;
     bm->diag_commands = diag_commands;
     bm->diag_commands_count = DIAG_COMMANDS_COUNT;
@@ -231,7 +320,8 @@ esp_err_t boiler_manager_init(boiler_manager_t *bm, boiler_manager_mode_t mode, 
     }
     
     ESP_LOGI(TAG, "Boiler manager initialized in %s mode with %d diagnostic commands, intercept rate: 1/%d",
-             mode == BOILER_MANAGER_MODE_PROXY ? "PROXY" : "PASSTHROUGH",
+             mode == BOILER_MANAGER_MODE_PROXY ? "PROXY" :
+             (mode == BOILER_MANAGER_MODE_CONTROL ? "CONTROL" : "PASSTHROUGH"),
              bm->diag_commands_count, bm->intercept_rate);
     
     return ESP_OK;
@@ -239,39 +329,47 @@ esp_err_t boiler_manager_init(boiler_manager_t *bm, boiler_manager_mode_t mode, 
 
 bool boiler_manager_request_interceptor(OpenThermRmt *ot, OpenThermRmtMessage *request)
 {
-    // Get boiler_manager from interceptor_data
     boiler_manager_t *bm = (boiler_manager_t *)ot->interceptor_data;
-    if (!bm || bm->mode != BOILER_MANAGER_MODE_PROXY) {
-        return false;  // Allow passthrough
+    if (!bm) return false;
+
+    bool proxy_mode = (bm->mode == BOILER_MANAGER_MODE_PROXY);
+    bool control_mode = (bm->mode == BOILER_MANAGER_MODE_CONTROL);
+    if (!proxy_mode && !control_mode) {
+        return false; // passthrough
     }
-    
-    // PRIORITY 1: Check if there's a pending manual write frame
-    // Manual writes take priority over diagnostics
+
+    if (control_mode && !bm->control_enabled) {
+        return false;
+    }
+
+    // Refresh control state from MQTT
+    if (control_mode) {
+        refresh_control_state(bm);
+    }
+
+    // PRIORITY 1: Manual writes (allowed in proxy/control)
     if (bm->manual_write_pending) {
         ESP_LOGI(TAG, "Intercepting ID=0 request, injecting manual WRITE_DATA frame: 0x%08lX",
                  (unsigned long)bm->manual_write_frame);
-        
-        // Send manual write frame to boiler
-        esp_err_t ret = opentherm_rmt_send_frame(bm->ot_instance, bm->manual_write_frame, 
+
+        esp_err_t ret = opentherm_rmt_send_frame(bm->ot_instance, bm->manual_write_frame,
                                                   &bm->ot_instance->secondary);
         if (ret != ESP_OK) {
             ESP_LOGE(TAG, "Failed to send manual WRITE_DATA frame: %s", esp_err_to_name(ret));
             bm->manual_write_result = ret;
             bm->manual_write_pending = false;
-            xSemaphoreGive(bm->manual_write_sem);  // Signal completion (with error)
-            return true;  // Block the ID=0 request
+            xSemaphoreGive(bm->manual_write_sem);
+            return true;
         }
-        
-        // Wait for response from boiler
+
         uint32_t response_frame = 0;
         ret = opentherm_rmt_receive_frame(bm->ot_instance, &bm->ot_instance->secondary, &response_frame, 800);
-        
+
         if (ret == ESP_OK) {
-            // Validate response
             uint8_t write_data_id = opentherm_rmt_get_data_id(bm->manual_write_frame);
             if (opentherm_rmt_check_parity(response_frame) &&
                 opentherm_rmt_get_data_id(response_frame) == write_data_id) {
-                
+
                 OpenThermRmtMessageType response_type = opentherm_rmt_get_message_type(response_frame);
                 if (response_type == OT_RMT_MSGTYPE_WRITE_ACK) {
                     ESP_LOGI(TAG, "Received WRITE_ACK for manual write: 0x%08lX", (unsigned long)response_frame);
@@ -298,88 +396,134 @@ bool boiler_manager_request_interceptor(OpenThermRmt *ot, OpenThermRmtMessage *r
             ESP_LOGW(TAG, "Timeout waiting for manual WRITE_DATA response");
             bm->manual_write_result = ESP_ERR_TIMEOUT;
         }
-        
-        // Clear pending flag and signal completion
+
         bm->manual_write_pending = false;
         xSemaphoreGive(bm->manual_write_sem);
-        
-        // Block the ID=0 request - don't forward it to boiler
-        return true;  // Block this request
+        return true;
     }
-    
-    // PRIORITY 2: Check if this is an ID=0 (Status) request from thermostat for diagnostic injection
-    if (request && opentherm_rmt_get_data_id(request->data) == OT_RMT_MSGID_STATUS) {
-        // Increment counter for ID=0 frames
-        bm->id0_frame_counter++;
-        
-        // Only intercept if we've reached the interception rate threshold
-        if (bm->id0_frame_counter < bm->intercept_rate) {
-            // Not time to intercept yet - allow passthrough
-            ESP_LOGD(TAG, "ID=0 frame %d/%d - allowing passthrough", 
-                     bm->id0_frame_counter, bm->intercept_rate);
-            return false;  // Allow passthrough
+
+    uint8_t data_id = request ? opentherm_rmt_get_data_id(request->data) : 0xFF;
+
+    // CONTROL MODE: stub basic replies to thermostat
+    if (control_mode && bm->control_enabled && bm->control_active && request) {
+        uint32_t resp_frame = 0;
+        switch (data_id) {
+            case OT_RMT_MSGID_STATUS: {
+                uint16_t status = build_status_word(bm->demand_ch_enabled);
+                resp_frame = opentherm_rmt_build_response(OT_RMT_MSGTYPE_READ_ACK, data_id, status);
+                break;
+            }
+            case 1: { // CH setpoint
+                float tset = bm->demand_tset_c > 0 ? bm->demand_tset_c : bm->diagnostics.t_setpoint.value;
+                uint16_t v = float_to_f88(tset);
+                resp_frame = opentherm_rmt_build_response(OT_RMT_MSGTYPE_READ_ACK, data_id, v);
+                break;
+            }
+            case 3: // Master config
+            case 17: { // relative modulation
+                resp_frame = opentherm_rmt_build_response(OT_RMT_MSGTYPE_READ_ACK, data_id, 0);
+                break;
+            }
+            default:
+                break;
         }
-        
-        // Reset counter and intercept this frame
+        if (resp_frame != 0) {
+            esp_err_t ret = opentherm_rmt_send_frame(bm->ot_instance, resp_frame, &bm->ot_instance->primary);
+            if (ret != ESP_OK) {
+                ESP_LOGW(TAG, "Failed to send stub response for ID=%d: %s", data_id, esp_err_to_name(ret));
+            }
+            return true; // block passthrough
+        }
+        // if not handled, fall through
+    }
+
+    // If control enabled but currently fallback, allow passthrough
+    if (control_mode && bm->control_enabled && bm->fallback_active) {
+        return false;
+    }
+
+    // Diagnostics injection (proxy or control)
+    if ((proxy_mode || (control_mode && bm->control_enabled)) && request && data_id == OT_RMT_MSGID_STATUS) {
+        bm->id0_frame_counter++;
+        if (bm->id0_frame_counter < bm->intercept_rate) {
+            ESP_LOGD(TAG, "ID=0 frame %d/%d - allowing passthrough",
+                     bm->id0_frame_counter, bm->intercept_rate);
+            return false;
+        }
+
         bm->id0_frame_counter = 0;
         ESP_LOGD(TAG, "Intercepting ID=0 request (1/%d), injecting diagnostic command", bm->intercept_rate);
-        
-        // Get next diagnostic command
+
         const boiler_diagnostic_cmd_t *cmd = &bm->diag_commands[bm->diag_commands_index];
         bm->diag_commands_index = (bm->diag_commands_index + 1) % bm->diag_commands_count;
-        
-        // Build diagnostic request
+
         OpenThermRmtMessage diag_request;
         diag_request.data = opentherm_rmt_build_request(OT_RMT_MSGTYPE_READ_DATA, cmd->data_id, 0);
-        
+
         ESP_LOGI(TAG, "Injecting diagnostic command: %s (ID=%d)", cmd->name, cmd->data_id);
-        
-        // Send diagnostic request directly to boiler (slave side)
-        esp_err_t ret = opentherm_rmt_send_frame(bm->ot_instance, diag_request.data, 
+
+        esp_err_t ret = opentherm_rmt_send_frame(bm->ot_instance, diag_request.data,
                                                   &bm->ot_instance->secondary);
-        if (ret != ESP_OK) {
-            ESP_LOGW(TAG, "Failed to send diagnostic command: %s", esp_err_to_name(ret));
-            return false;  // Let normal flow continue
-        }
-        
-        // Wait for response from boiler
-        uint32_t diag_response_frame = 0;
-        ret = opentherm_rmt_receive_frame(bm->ot_instance, &bm->ot_instance->secondary, &diag_response_frame, 800);
-        
         if (ret == ESP_OK) {
-            // Validate response
-            if (opentherm_rmt_check_parity(diag_response_frame) &&
-                opentherm_rmt_is_valid_response_type(diag_response_frame) &&
-                opentherm_rmt_get_data_id(diag_response_frame) == cmd->data_id) {
-                
-                // Parse and store diagnostic result
-                parse_diagnostic_response(bm, cmd->data_id, diag_response_frame);
-                
-                ESP_LOGI(TAG, "Received diagnostic response for %s: 0x%08lX",
-                         cmd->name, (unsigned long)diag_response_frame);
+            uint32_t diag_response_frame = 0;
+            ret = opentherm_rmt_receive_frame(bm->ot_instance, &bm->ot_instance->secondary, &diag_response_frame, 800);
+            if (ret == ESP_OK) {
+                if (opentherm_rmt_check_parity(diag_response_frame) &&
+                    opentherm_rmt_is_valid_response_type(diag_response_frame) &&
+                    opentherm_rmt_get_data_id(diag_response_frame) == cmd->data_id) {
+                    parse_diagnostic_response(bm, cmd->data_id, diag_response_frame);
+                    ESP_LOGI(TAG, "Received diagnostic response for %s: 0x%08lX",
+                             cmd->name, (unsigned long)diag_response_frame);
+                } else {
+                    ESP_LOGW(TAG, "Invalid diagnostic response for %s: 0x%08lX",
+                             cmd->name, (unsigned long)diag_response_frame);
+                }
             } else {
-                ESP_LOGW(TAG, "Invalid diagnostic response for %s: 0x%08lX",
-                         cmd->name, (unsigned long)diag_response_frame);
+                ESP_LOGW(TAG, "Timeout waiting for diagnostic response for %s", cmd->name);
             }
         } else {
-            ESP_LOGW(TAG, "Timeout waiting for diagnostic response for %s", cmd->name);
+            ESP_LOGW(TAG, "Failed to send diagnostic command: %s", esp_err_to_name(ret));
         }
-        
-        // Block the ID=0 request - don't forward it to boiler
-        // Don't respond to thermostat either (it will timeout, which is acceptable)
-        return true;  // Block this request
+
+        // In control mode, also provide a stub response to thermostat for ID0
+        if (control_mode && bm->control_active) {
+            uint16_t status = build_status_word(bm->demand_ch_enabled);
+            uint32_t resp_frame = opentherm_rmt_build_response(OT_RMT_MSGTYPE_READ_ACK, OT_RMT_MSGID_STATUS, status);
+            opentherm_rmt_send_frame(bm->ot_instance, resp_frame, &bm->ot_instance->primary);
+        }
+
+        return true;
     }
-    
-    // Not ID=0 - allow passthrough
+
     return false;
 }
 
 bool boiler_manager_process(boiler_manager_t *bm, OpenThermRmtMessage *request, OpenThermRmtMessage *response)
 {
-    // This function is kept for compatibility but the interceptor callback is used instead
-    (void)bm;
     (void)request;
     (void)response;
+    if (!bm) return false;
+
+    if (bm->mode == BOILER_MANAGER_MODE_CONTROL) {
+        refresh_control_state(bm);
+        if (bm->control_active) {
+            int64_t now_ms = esp_timer_get_time() / 1000;
+            if (bm->last_control_apply_ms == 0 || (now_ms - bm->last_control_apply_ms) >= CONTROL_APPLY_INTERVAL_MS) {
+                if (bm->demand_tset_c > 0) {
+                    uint16_t val = float_to_f88(bm->demand_tset_c);
+                    boiler_manager_write_data(bm, 1, val, NULL);
+                }
+                uint16_t status = build_status_word(bm->demand_ch_enabled);
+                boiler_manager_write_data(bm, OT_RMT_MSGID_STATUS, status, NULL);
+                bm->last_control_apply_ms = now_ms;
+            }
+
+            if (bm->last_diag_poll_ms == 0 || (now_ms - bm->last_diag_poll_ms) >= CONTROL_DIAG_INTERVAL_MS) {
+                poll_next_diag(bm);
+                bm->last_diag_poll_ms = now_ms;
+            }
+        }
+    }
     return false;
 }
 
@@ -468,4 +612,32 @@ esp_err_t boiler_manager_write_data(boiler_manager_t *bm, uint8_t data_id, uint1
     }
 }
 
+void boiler_manager_set_control_enabled(boiler_manager_t *bm, bool enabled)
+{
+    if (!bm) return;
+    bm->control_enabled = enabled;
+    bm->fallback_active = false;
+    bm->control_active = false;
+}
 
+void boiler_manager_get_status(boiler_manager_t *bm, boiler_manager_status_t *out)
+{
+    if (!bm || !out) return;
+    bool mqtt_ok = refresh_control_state(bm);
+    out->control_enabled = bm->control_enabled;
+    out->control_active = bm->control_active;
+    out->fallback_active = bm->fallback_active;
+    out->mqtt_available = mqtt_ok;
+    out->demand_tset_c = bm->demand_tset_c;
+    out->demand_ch_enabled = bm->demand_ch_enabled;
+    out->last_demand_ms = bm->last_demand_ms;
+}
+
+void boiler_manager_set_mode(boiler_manager_t *bm, boiler_manager_mode_t mode)
+{
+    if (!bm) return;
+    bm->mode = mode;
+    bm->control_enabled = (mode == BOILER_MANAGER_MODE_CONTROL) ? bm->control_enabled : false;
+    bm->control_active = false;
+    bm->fallback_active = false;
+}

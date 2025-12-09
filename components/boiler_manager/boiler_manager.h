@@ -21,7 +21,8 @@ extern "C" {
 // Boiler manager operation modes
 typedef enum {
     BOILER_MANAGER_MODE_PROXY,        // Proxy mode: intercept ID=0, inject diagnostics
-    BOILER_MANAGER_MODE_PASSTHROUGH   // Future: pass everything through unchanged
+    BOILER_MANAGER_MODE_PASSTHROUGH,  // Pass everything through unchanged
+    BOILER_MANAGER_MODE_CONTROL       // Apply MQTT overrides, stub thermostat replies
 } boiler_manager_mode_t;
 
 // Diagnostic value with timestamp
@@ -91,6 +92,14 @@ typedef struct {
 typedef struct boiler_manager {
     boiler_manager_mode_t mode;
     boiler_diagnostics_t diagnostics;
+    bool control_enabled;       // user toggle
+    bool control_active;        // enabled + mqtt available
+    bool fallback_active;       // mqtt unavailable
+    float demand_tset_c;
+    bool demand_ch_enabled;
+    int64_t last_demand_ms;
+    int64_t last_control_apply_ms;
+    int64_t last_diag_poll_ms;
     
     // Diagnostic command rotation
     const boiler_diagnostic_cmd_t *diag_commands;
@@ -116,6 +125,16 @@ typedef struct boiler_manager {
     // Reference to OpenTherm RMT instance
     OpenThermRmt *ot_instance;
 } boiler_manager_t;
+
+typedef struct {
+    bool control_enabled;
+    bool control_active;
+    bool fallback_active;
+    bool mqtt_available;
+    float demand_tset_c;
+    bool demand_ch_enabled;
+    int64_t last_demand_ms;
+} boiler_manager_status_t;
 
 /**
  * Initialize boiler manager
@@ -167,6 +186,14 @@ esp_err_t boiler_manager_inject_command(boiler_manager_t *bm, uint8_t data_id);
  * @return ESP_OK on success, ESP_ERR_TIMEOUT on timeout, ESP_FAIL on error
  */
 esp_err_t boiler_manager_write_data(boiler_manager_t *bm, uint8_t data_id, uint16_t data_value, uint32_t *response_frame);
+
+bool boiler_manager_process(boiler_manager_t *bm, OpenThermRmtMessage *request, OpenThermRmtMessage *response);
+
+void boiler_manager_set_control_enabled(boiler_manager_t *bm, bool enabled);
+
+void boiler_manager_get_status(boiler_manager_t *bm, boiler_manager_status_t *out);
+
+void boiler_manager_set_mode(boiler_manager_t *bm, boiler_manager_mode_t mode);
 
 #ifdef __cplusplus
 }

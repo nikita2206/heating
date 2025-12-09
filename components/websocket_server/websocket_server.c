@@ -189,6 +189,7 @@ static const char *diagnostics_page =
     "<nav><a href='/' class='logo'><svg viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2'><path d='M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5'/></svg>OT Gateway</a>"
     "<div class='nav-links'><a href='/'>Dashboard</a><a href='/logs'>Logs</a><a href='/diagnostics'>Diagnostics</a><a href='/mqtt'>MQTT</a><a href='/write' class='active'>Manual Write</a><a href='/ota'>OTA Update</a></div></nav>"
     "<div class='container'><h1>Boiler Diagnostics</h1><p class='subtitle'>Real-time boiler state monitoring</p>"
+    "<div class='card'><div class='card-title'>Control Mode</div><div id='control-info'>--</div></div>"
     "<div class='section-title'>Temperatures</div>"
     "<div class='diagnostics-grid' id='temps'></div>"
     "<div class='section-title'>Status</div>"
@@ -268,7 +269,13 @@ static const char *diagnostics_page =
  "});"
     "}).catch(err=>console.error('Failed to fetch diagnostics:',err));"
     "}"
+    "function updateControlStatus(){fetch('/api/control_mode').then(r=>r.json()).then(d=>{"
+    "let text='Control disabled';"
+    "if(d.enabled){text='Control '+(d.active?'ACTIVE':(d.fallback?'Fallback (passthrough)':'Idle'))+' | TSet: '+(d.demand_tset?d.demand_tset.toFixed(1)+'°C':'--')+' | CH: '+(d.demand_ch?'ON':'OFF');}"
+    "document.getElementById('control-info').textContent=text;"
+    "}).catch(()=>{});}"
     "updateDiagnostics();setInterval(updateDiagnostics,2000);"
+    "updateControlStatus();setInterval(updateControlStatus,5000);"
     "</script></body></html>";
 
 // MQTT config page
@@ -299,7 +306,15 @@ static const char *mqtt_page =
     "<div class='form-group'><label class='form-label'>Discovery Prefix</label><input class='form-input' id='discovery_prefix' placeholder='homeassistant'></div>"
     "<button type='submit' class='btn btn-primary'>Save & Restart MQTT</button>"
     "<small>Changes are stored in NVS and applied immediately.</small>"
-    "</form></div></div>"
+    "</form></div>"
+    "<div class='card'><h3 style='margin-bottom:12px'>Control Mode</h3>"
+    "<form id='control-form'>"
+    "<label class='form-switch'><input type='checkbox' id='control_enable'> <span>Enable control mode (MQTT overrides)</span></label>"
+    "<div class='form-group'><div class='status-chip' id='control-chip'>--</div>"
+    "<div id='control-demand' class='form-help'></div></div>"
+    "<button type='submit' class='btn btn-secondary'>Apply</button>"
+    "</form></div>"
+    "</div>"
     "<script>"
     "function loadConfig(){fetch('/api/mqtt_config').then(r=>r.json()).then(d=>{"
     "document.getElementById('enable').checked=d.enable;"
@@ -311,6 +326,15 @@ static const char *mqtt_page =
     "const chip=document.getElementById('mqtt-chip');"
     "if(d.connected){chip.textContent='Connected';chip.className='status-chip ok';}"
     "else{chip.textContent='Offline';chip.className='status-chip bad';}"
+    "}).catch(()=>{});}"
+    "function loadControl(){fetch('/api/control_mode').then(r=>r.json()).then(d=>{"
+    "document.getElementById('control_enable').checked=d.enabled;"
+    "const chip=document.getElementById('control-chip');"
+    "let status='Offline';let cls='status-chip bad';"
+    "if(d.enabled){status=d.active?'Active':(d.fallback?'Fallback (passthrough)':'Idle');cls=d.active?'status-chip ok':(d.fallback?'status-chip bad':'status-chip');}"
+    "chip.textContent=status;chip.className=cls;"
+    "let demand='Demanded TSet: '+(d.demand_tset?d.demand_tset.toFixed(1)+'°C':'--')+', CH: '+(d.demand_ch?'ON':'OFF');"
+    "document.getElementById('control-demand').textContent=demand;"
     "}).catch(()=>{});}"
     "document.getElementById('mqtt-form').addEventListener('submit',function(e){"
     "e.preventDefault();"
@@ -324,7 +348,15 @@ static const char *mqtt_page =
     "fetch('/api/mqtt_config',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:params.toString()})"
     ".then(r=>r.json()).then(()=>{loadConfig();alert('Saved and restarted');}).catch(()=>alert('Failed to save'))"
     "});"
+    "document.getElementById('control-form').addEventListener('submit',function(e){"
+    "e.preventDefault();"
+    "let params=new URLSearchParams();"
+    "params.append('enabled',document.getElementById('control_enable').checked?'on':'off');"
+    "fetch('/api/control_mode',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:params.toString()})"
+    ".then(()=>loadControl()).catch(()=>alert('Failed to toggle control mode'));"
+    "});"
     "loadConfig();"
+    "loadControl();"
     "</script></body></html>";
 
 // Manual write page HTML
@@ -449,13 +481,14 @@ static esp_err_t mqtt_state_handler(httpd_req_t *req)
     char buf[256];
     int len = snprintf(buf, sizeof(buf),
         "{\"connected\":%s,\"last_tset_valid\":%s,\"last_tset\":%.2f,"
-        "\"last_ch_enable_valid\":%s,\"last_ch_enable\":%s,\"last_update_ms\":%lld}",
+        "\"last_ch_enable_valid\":%s,\"last_ch_enable\":%s,\"last_update_ms\":%lld,\"available\":%s}",
         st.connected ? "true" : "false",
         st.last_tset_valid ? "true" : "false",
         st.last_tset_c,
         st.last_ch_enable_valid ? "true" : "false",
         st.last_ch_enable ? "true" : "false",
-        (long long)st.last_update_ms);
+        (long long)st.last_update_ms,
+        st.available ? "true" : "false");
     httpd_resp_set_type(req, "application/json");
     httpd_resp_send(req, buf, len);
     return ESP_OK;
@@ -561,6 +594,48 @@ static esp_err_t mqtt_config_post_handler(httpd_req_t *req)
     mqtt_bridge_save_config(&cfg);
     mqtt_bridge_start(&cfg, NULL);
 
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, "{\"status\":\"ok\"}");
+    return ESP_OK;
+}
+
+// Control mode API
+static esp_err_t control_mode_get_handler(httpd_req_t *req)
+{
+    boiler_manager_t *bm = opentherm_gateway_get_boiler_manager();
+    boiler_manager_status_t st = {0};
+    boiler_manager_get_status(bm, &st);
+    char buf[256];
+    int len = snprintf(buf, sizeof(buf),
+        "{\"enabled\":%s,\"active\":%s,\"fallback\":%s,\"mqtt_available\":%s,"
+        "\"demand_tset\":%.2f,\"demand_ch\":%s,\"last_demand_ms\":%lld}",
+        st.control_enabled ? "true" : "false",
+        st.control_active ? "true" : "false",
+        st.fallback_active ? "true" : "false",
+        st.mqtt_available ? "true" : "false",
+        st.demand_tset_c,
+        st.demand_ch_enabled ? "true" : "false",
+        (long long)st.last_demand_ms);
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_send(req, buf, len);
+    return ESP_OK;
+}
+
+static esp_err_t control_mode_post_handler(httpd_req_t *req)
+{
+    char body[256];
+    read_req_body(req, body, sizeof(body));
+    char val[64];
+    parse_form_kv(body, "enabled", val, sizeof(val));
+    bool enable = (strcmp(val, "on") == 0 || strcmp(val, "1") == 0 || strcasecmp(val, "true") == 0);
+    boiler_manager_t *bm = opentherm_gateway_get_boiler_manager();
+    if (enable) {
+        boiler_manager_set_mode(bm, BOILER_MANAGER_MODE_CONTROL);
+        boiler_manager_set_control_enabled(bm, true);
+    } else {
+        boiler_manager_set_control_enabled(bm, false);
+        boiler_manager_set_mode(bm, BOILER_MANAGER_MODE_PASSTHROUGH);
+    }
     httpd_resp_set_type(req, "application/json");
     httpd_resp_sendstr(req, "{\"status\":\"ok\"}");
     return ESP_OK;
@@ -976,6 +1051,22 @@ esp_err_t websocket_server_start(websocket_server_t *ws_server)
     };
     httpd_register_uri_handler(ws_server->server, &mqtt_cfg_get_uri);
     httpd_register_uri_handler(ws_server->server, &mqtt_cfg_post_uri);
+
+    // Control mode API handlers
+    httpd_uri_t control_get_uri = {
+        .uri = "/api/control_mode",
+        .method = HTTP_GET,
+        .handler = control_mode_get_handler,
+        .user_ctx = NULL
+    };
+    httpd_uri_t control_post_uri = {
+        .uri = "/api/control_mode",
+        .method = HTTP_POST,
+        .handler = control_mode_post_handler,
+        .user_ctx = NULL
+    };
+    httpd_register_uri_handler(ws_server->server, &control_get_uri);
+    httpd_register_uri_handler(ws_server->server, &control_post_uri);
     
     // Register manual write API handler
     httpd_uri_t write_api_uri = {

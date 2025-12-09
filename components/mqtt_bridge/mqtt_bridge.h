@@ -25,11 +25,16 @@ typedef struct {
 
 typedef struct {
     bool connected;
+    bool available;            // connected and not stale
     bool last_tset_valid;
     float last_tset_c;
     bool last_ch_enable_valid;
     bool last_ch_enable;
-    int64_t last_update_ms;
+    int64_t last_update_ms;    // last override message (tset or ch)
+    int64_t last_override_ms;  // same as above for clarity
+    bool heartbeat_valid;
+    float heartbeat_value;
+    int64_t last_heartbeat_ms;
 } mqtt_bridge_state_t;
 
 /**
@@ -52,6 +57,16 @@ esp_err_t mqtt_bridge_save_config(const mqtt_bridge_config_t *cfg);
  * Load config from NVS; if missing, fill defaults from Kconfig.
  */
 esp_err_t mqtt_bridge_load_config(mqtt_bridge_config_t *out_cfg);
+
+/**
+ * Publish a diagnostic/sensor value (retained) and discovery entry.
+ * @param id short id suffix (e.g., \"tboiler\")
+ * @param name friendly name
+ * @param unit unit string (may be NULL/empty)
+ * @param value sensor value
+ * @param valid if false, do not publish a value
+ */
+esp_err_t mqtt_bridge_publish_sensor(const char *id, const char *name, const char *unit, float value, bool valid);
 
 /**
  * Thread-safe snapshot of state.

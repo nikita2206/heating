@@ -22,6 +22,8 @@ static char topic_tset_cmd[128];
 static char topic_tset_state[128];
 static char topic_ch_enable_cmd[128];
 static char topic_ch_enable_state[128];
+static char topic_hb_cmd[128];
+static char topic_hb_state[128];
 
 static mqtt_bridge_state_t s_state;
 static SemaphoreHandle_t s_state_mutex;
@@ -29,6 +31,9 @@ static esp_mqtt_client_handle_t s_client;
 static mqtt_bridge_config_t s_cfg;
 static char topic_discovery_tset[160];
 static char topic_discovery_ch[160];
+static int64_t s_last_override_ms = 0;
+
+#define MQTT_HEARTBEAT_TIMEOUT_MS 90000
 
 static void publish_discovery(esp_mqtt_client_handle_t client);
 
@@ -46,6 +51,8 @@ static void state_set_tset(float tset_c)
         s_state.last_tset_valid = true;
         s_state.last_tset_c = tset_c;
         s_state.last_update_ms = esp_timer_get_time() / 1000;
+        s_state.last_override_ms = s_state.last_update_ms;
+        s_last_override_ms = s_state.last_override_ms;
         xSemaphoreGive(s_state_mutex);
     }
 }
@@ -56,6 +63,18 @@ static void state_set_ch_enable(bool ch_on)
         s_state.last_ch_enable_valid = true;
         s_state.last_ch_enable = ch_on;
         s_state.last_update_ms = esp_timer_get_time() / 1000;
+        s_state.last_override_ms = s_state.last_update_ms;
+        s_last_override_ms = s_state.last_override_ms;
+        xSemaphoreGive(s_state_mutex);
+    }
+}
+
+static void state_set_heartbeat(float hb)
+{
+    if (xSemaphoreTake(s_state_mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+        s_state.heartbeat_valid = true;
+        s_state.heartbeat_value = hb;
+        s_state.last_heartbeat_ms = esp_timer_get_time() / 1000;
         xSemaphoreGive(s_state_mutex);
     }
 }
@@ -93,6 +112,10 @@ static void handle_message(esp_mqtt_event_handle_t event)
         state_set_ch_enable(on);
         ESP_LOGI(TAG, "Received CH enable override: %s", on ? "ON" : "OFF");
         publish_state(event->client, topic_ch_enable_state, on ? "ON" : "OFF");
+    } else if (strcmp(topic, topic_hb_cmd) == 0) {
+        float hb = strtof(payload, NULL);
+        state_set_heartbeat(hb);
+        publish_state(event->client, topic_hb_state, payload);
     }
 }
 
@@ -107,11 +130,16 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
         state_set_connected(true);
         esp_mqtt_client_subscribe(client, topic_tset_cmd, 1);
         esp_mqtt_client_subscribe(client, topic_ch_enable_cmd, 1);
+        esp_mqtt_client_subscribe(client, topic_hb_cmd, 1);
         publish_discovery(client);
         break;
     case MQTT_EVENT_DISCONNECTED:
         ESP_LOGW(TAG, "MQTT disconnected");
         state_set_connected(false);
+        if (xSemaphoreTake(s_state_mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+            s_state.available = false;
+            xSemaphoreGive(s_state_mutex);
+        }
         break;
     case MQTT_EVENT_DATA:
         handle_message(event);
@@ -174,6 +202,91 @@ static void publish_discovery(esp_mqtt_client_handle_t client)
         "}",
         base_len, base, topic_ch_enable_cmd, topic_ch_enable_state, base_len, base);
     publish_state(client, topic_discovery_ch, payload_ch);
+
+    // Heartbeat number
+    char topic_discovery_hb[160];
+    snprintf(topic_discovery_hb, sizeof(topic_discovery_hb), "%s/number/%s_hb/config", disc, base);
+    char payload_hb[512];
+    snprintf(payload_hb, sizeof(payload_hb),
+        "{"
+        "\"name\":\"OT Heartbeat\","
+        "\"uniq_id\":\"%.*s_hb\","
+        "\"cmd_t\":\"%s\","
+        "\"stat_t\":\"%s\","
+        "\"min\":0,\"max\":1000000,\"step\":1,"
+        "\"retain\":true,"
+        "\"dev\":{"
+            "\"ids\":[\"%.*s\"],"
+            "\"name\":\"OpenTherm Gateway\","
+            "\"mf\":\"OT Gateway\","
+            "\"mdl\":\"ESP32\""
+        "}"
+        "}",
+        base_len, base, topic_hb_cmd, topic_hb_state, base_len, base);
+    publish_state(client, topic_discovery_hb, payload_hb);
+}
+
+static esp_err_t publish_sensor_discovery(const char *id, const char *name, const char *unit)
+{
+    const char *disc = (s_cfg.discovery_prefix[0] ? s_cfg.discovery_prefix : "homeassistant");
+    const char *base = (s_cfg.base_topic[0] ? s_cfg.base_topic : "ot_gateway");
+    char topic[200];
+    snprintf(topic, sizeof(topic), "%s/sensor/%s_%s/config", disc, base, id);
+    char state_topic[160];
+    snprintf(state_topic, sizeof(state_topic), "%s/diag/%s/state", base, id);
+    char payload[512];
+    if (unit && unit[0]) {
+        snprintf(payload, sizeof(payload),
+            "{"
+            "\"name\":\"%s\","
+            "\"uniq_id\":\"%s_%s\","
+            "\"stat_t\":\"%s\","
+            "\"unit_of_meas\":\"%s\","
+            "\"retain\":true,"
+            "\"dev\":{"
+                "\"ids\":[\"%s\"],"
+                "\"name\":\"OpenTherm Gateway\","
+                "\"mf\":\"OT Gateway\","
+                "\"mdl\":\"ESP32\""
+            "}"
+            "}",
+            name, base, id, state_topic, unit, base);
+    } else {
+        snprintf(payload, sizeof(payload),
+            "{"
+            "\"name\":\"%s\","
+            "\"uniq_id\":\"%s_%s\","
+            "\"stat_t\":\"%s\","
+            "\"retain\":true,"
+            "\"dev\":{"
+                "\"ids\":[\"%s\"],"
+                "\"name\":\"OpenTherm Gateway\","
+                "\"mf\":\"OT Gateway\","
+                "\"mdl\":\"ESP32\""
+            "}"
+            "}",
+            name, base, id, state_topic, base);
+    }
+    return publish_state(s_client, topic, payload);
+}
+
+esp_err_t mqtt_bridge_publish_sensor(const char *id, const char *name, const char *unit, float value, bool valid)
+{
+    if (!s_client || !s_state.connected) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    // discovery
+    publish_sensor_discovery(id, name, unit ? unit : "");
+
+    const char *base = (s_cfg.base_topic[0] ? s_cfg.base_topic : "ot_gateway");
+    char topic[160];
+    snprintf(topic, sizeof(topic), "%s/diag/%s/state", base, id);
+    if (!valid) {
+        return publish_state(s_client, topic, ""); // clear
+    }
+    char buf[32];
+    snprintf(buf, sizeof(buf), "%.2f", value);
+    return publish_state(s_client, topic, buf);
 }
 
 static void fill_defaults(mqtt_bridge_config_t *cfg)
@@ -283,6 +396,8 @@ esp_err_t mqtt_bridge_start(const mqtt_bridge_config_t *cfg, mqtt_bridge_state_t
     build_topic(topic_tset_state, sizeof(topic_tset_state), base, "tset/state");
     build_topic(topic_ch_enable_cmd, sizeof(topic_ch_enable_cmd), base, "ch_enable/set");
     build_topic(topic_ch_enable_state, sizeof(topic_ch_enable_state), base, "ch_enable/state");
+    build_topic(topic_hb_cmd, sizeof(topic_hb_cmd), base, "heartbeat/set");
+    build_topic(topic_hb_state, sizeof(topic_hb_state), base, "heartbeat/state");
 
     esp_mqtt_client_config_t mqtt_cfg = {
         .broker = {
@@ -323,7 +438,12 @@ void mqtt_bridge_get_state(mqtt_bridge_state_t *out)
     if (!out || !s_state_mutex) {
         return;
     }
+    int64_t now_ms = esp_timer_get_time() / 1000;
     if (xSemaphoreTake(s_state_mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+        bool hb_fresh = s_state.heartbeat_valid &&
+                        (s_state.last_heartbeat_ms <= now_ms) &&
+                        ((now_ms - s_state.last_heartbeat_ms) <= MQTT_HEARTBEAT_TIMEOUT_MS);
+        s_state.available = s_state.connected && hb_fresh;
         *out = s_state;
         xSemaphoreGive(s_state_mutex);
     }
