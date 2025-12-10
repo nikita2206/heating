@@ -1,0 +1,26 @@
+menu "OpenTherm Implementation"
+
+    choice OPENTHERM_IMPL
+        prompt "OpenTherm Backend Implementation"
+        default OPENTHERM_IMPL_RMT
+        help
+            Select which OpenTherm implementation to use.
+            
+            - RMT: Uses ESP32's RMT peripheral for hardware-timed encoding/decoding
+            - Library: Uses the Arduino-based opentherm_library (ihormelnyk)
+
+        config OPENTHERM_IMPL_RMT
+            bool "RMT (Hardware-based)"
+            help
+                Use the RMT peripheral-based implementation.
+                Provides hardware-timed pulse generation and automatic edge timestamping.
+
+        config OPENTHERM_IMPL_LIBRARY
+            bool "Arduino Library"
+            help
+                Use the Arduino-based opentherm_library implementation.
+                Requires Arduino framework as a dependency.
+    endchoice
+
+endmenu
+

@@ -8,7 +8,7 @@
 #include "esp_timer.h"
 #include "boiler_manager.h"
 #include "opentherm_gateway.h"
-#include "opentherm_rmt.h"
+#include "opentherm_api.h"
 #include "mqtt_bridge.h"
 #include <string.h>
 #include <stdio.h>
@@ -772,15 +772,15 @@ static esp_err_t write_api_handler(httpd_req_t *req)
     // Build JSON response
     char json_response[512];
     if (err == ESP_OK) {
-        OpenThermRmtMessageType response_type = opentherm_rmt_get_message_type(response_frame);
-        uint16_t response_data = opentherm_rmt_get_uint16(response_frame);
+        ot_message_type_t response_type = ot_get_message_type(response_frame);
+        uint16_t response_data = ot_get_uint16(response_frame);
         
         snprintf(json_response, sizeof(json_response),
                  "{\"success\":true,\"request\":{\"data_id\":%d,\"data_value\":%d},"
                  "\"response\":{\"frame\":%lu,\"type\":%d,\"data_id\":%d,\"data_value\":%d}}",
                  data_id, data_value,
                  (unsigned long)response_frame, response_type,
-                 opentherm_rmt_get_data_id(response_frame), response_data);
+                 ot_get_data_id(response_frame), response_data);
     } else {
         const char *error_msg = "Unknown error";
         if (err == ESP_ERR_TIMEOUT) error_msg = "Timeout waiting for response";

@@ -3,6 +3,8 @@ build/
 sdkconfig
 sdkconfig.old
 
+.DS_Store
+
 .vscode
 
 # ESP-IDF Component Manager generated files

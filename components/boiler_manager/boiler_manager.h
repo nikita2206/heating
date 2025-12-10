@@ -3,6 +3,8 @@
  * 
  * Intercepts ID=0 (Status) commands from thermostat and injects diagnostic
  * queries to monitor boiler state. Stores diagnostic results for UI display.
+ * 
+ * NOTE: Now uses the generic OpenTherm API for implementation independence.
  */
 
 #ifndef BOILER_MANAGER_H
@@ -10,7 +12,7 @@
 
 #include <stdint.h>
 #include <stdbool.h>
-#include "opentherm_rmt.h"
+#include "opentherm_api.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 
@@ -108,7 +110,7 @@ typedef struct boiler_manager {
     
     // State for ID=0 interception
     bool intercepting_id0;
-    OpenThermRmtMessage pending_diag_request;
+    ot_message_t pending_diag_request;
     int64_t diag_request_time_ms;
     
     // ID=0 interception rate control
@@ -122,8 +124,8 @@ typedef struct boiler_manager {
     esp_err_t manual_write_result; // Result code (set by interceptor)
     SemaphoreHandle_t manual_write_sem; // Semaphore to signal completion
     
-    // Reference to OpenTherm RMT instance
-    OpenThermRmt *ot_instance;
+    // Reference to OpenTherm instance (generic API)
+    ot_handle_t *ot_instance;
 } boiler_manager_t;
 
 typedef struct {
@@ -141,23 +143,24 @@ typedef struct {
  * 
  * @param bm Boiler manager instance
  * @param mode Operation mode (PROXY or PASSTHROUGH)
- * @param ot OpenTherm RMT instance for sending commands
+ * @param ot OpenTherm instance (generic API handle)
  * @param intercept_rate Intercept every Nth ID=0 frame (e.g., 10 = intercept 1 in 10, 0 = intercept all)
  * @return ESP_OK on success
  */
-esp_err_t boiler_manager_init(boiler_manager_t *bm, boiler_manager_mode_t mode, OpenThermRmt *ot, uint32_t intercept_rate);
+esp_err_t boiler_manager_init(boiler_manager_t *bm, boiler_manager_mode_t mode, ot_handle_t *ot, uint32_t intercept_rate);
 
 /**
- * Request interceptor callback for OpenTherm RMT gateway
+ * Request interceptor callback for OpenTherm gateway
  * 
  * This is called by the gateway when a request is received.
  * Returns true to block forwarding, false to allow passthrough.
  * 
- * @param ot OpenTherm RMT instance
+ * @param ot OpenTherm instance (generic API handle)
  * @param request Request message
+ * @param user_data User data (boiler_manager_t instance)
  * @return true to block forwarding, false to allow passthrough
  */
-bool boiler_manager_request_interceptor(OpenThermRmt *ot, OpenThermRmtMessage *request);
+bool boiler_manager_request_interceptor(ot_handle_t *ot, ot_message_t *request, void *user_data);
 
 /**
  * Get current diagnostic state (for UI)
@@ -187,7 +190,7 @@ esp_err_t boiler_manager_inject_command(boiler_manager_t *bm, uint8_t data_id);
  */
 esp_err_t boiler_manager_write_data(boiler_manager_t *bm, uint8_t data_id, uint16_t data_value, uint32_t *response_frame);
 
-bool boiler_manager_process(boiler_manager_t *bm, OpenThermRmtMessage *request, OpenThermRmtMessage *response);
+bool boiler_manager_process(boiler_manager_t *bm, ot_message_t *request, ot_message_t *response);
 
 void boiler_manager_set_control_enabled(boiler_manager_t *bm, bool enabled);
 
