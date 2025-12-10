@@ -227,7 +227,7 @@ static void opentherm_gateway_task(void *pvParameters)
     }
 
     // Start WebSocket server for real-time message monitoring
-    if (websocket_server_start(&ws_server) != ESP_OK) {
+    if (websocket_server_start(&ws_server, &boiler_mgr) != ESP_OK) {
         ESP_LOGE(TAG, "Failed to start WebSocket server");
         vTaskDelete(NULL);
         return;

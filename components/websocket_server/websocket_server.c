@@ -7,7 +7,6 @@
 #include "esp_http_server.h"
 #include "esp_timer.h"
 #include "boiler_manager.h"
-#include "opentherm_gateway.h"
 #include "opentherm_api.h"
 #include "mqtt_bridge.h"
 #include <string.h>
@@ -15,6 +14,7 @@
 #include <stdlib.h>
 
 static const char *TAG = "WebSocket";
+static boiler_manager_t *s_boiler_mgr = NULL;
 
 // Common CSS styles shared across pages
 static const char *common_styles = 
@@ -602,9 +602,8 @@ static esp_err_t mqtt_config_post_handler(httpd_req_t *req)
 // Control mode API
 static esp_err_t control_mode_get_handler(httpd_req_t *req)
 {
-    boiler_manager_t *bm = opentherm_gateway_get_boiler_manager();
     boiler_manager_status_t st = {0};
-    boiler_manager_get_status(bm, &st);
+    boiler_manager_get_status(s_boiler_mgr, &st);
     char buf[256];
     int len = snprintf(buf, sizeof(buf),
         "{\"enabled\":%s,\"active\":%s,\"fallback\":%s,\"mqtt_available\":%s,"
@@ -628,13 +627,12 @@ static esp_err_t control_mode_post_handler(httpd_req_t *req)
     char val[64];
     parse_form_kv(body, "enabled", val, sizeof(val));
     bool enable = (strcmp(val, "on") == 0 || strcmp(val, "1") == 0 || strcasecmp(val, "true") == 0);
-    boiler_manager_t *bm = opentherm_gateway_get_boiler_manager();
     if (enable) {
-        boiler_manager_set_mode(bm, BOILER_MANAGER_MODE_CONTROL);
-        boiler_manager_set_control_enabled(bm, true);
+        boiler_manager_set_mode(s_boiler_mgr, BOILER_MANAGER_MODE_CONTROL);
+        boiler_manager_set_control_enabled(s_boiler_mgr, true);
     } else {
-        boiler_manager_set_control_enabled(bm, false);
-        boiler_manager_set_mode(bm, BOILER_MANAGER_MODE_PASSTHROUGH);
+        boiler_manager_set_control_enabled(s_boiler_mgr, false);
+        boiler_manager_set_mode(s_boiler_mgr, BOILER_MANAGER_MODE_PASSTHROUGH);
     }
     httpd_resp_set_type(req, "application/json");
     httpd_resp_sendstr(req, "{\"status\":\"ok\"}");
@@ -672,8 +670,7 @@ static esp_err_t mqtt_page_handler(httpd_req_t *req)
 // API handler for manual WRITE_DATA frame injection
 static esp_err_t write_api_handler(httpd_req_t *req)
 {
-    boiler_manager_t *bm = (boiler_manager_t *)opentherm_gateway_get_boiler_manager();
-    if (!bm) {
+    if (!s_boiler_mgr) {
         httpd_resp_set_status(req, "500 Internal Server Error");
         httpd_resp_send(req, "{\"error\":\"Boiler manager not available\"}", -1);
         return ESP_FAIL;
@@ -767,7 +764,7 @@ static esp_err_t write_api_handler(httpd_req_t *req)
     
     // Send WRITE_DATA frame
     uint32_t response_frame = 0;
-    esp_err_t err = boiler_manager_write_data(bm, data_id, data_value, &response_frame);
+    esp_err_t err = boiler_manager_write_data(s_boiler_mgr, data_id, data_value, &response_frame);
     
     // Build JSON response
     char json_response[512];
@@ -801,14 +798,13 @@ static esp_err_t write_api_handler(httpd_req_t *req)
 // API handler for diagnostics JSON
 static esp_err_t diagnostics_api_handler(httpd_req_t *req)
 {
-    boiler_manager_t *bm = (boiler_manager_t *)opentherm_gateway_get_boiler_manager();
-    if (!bm) {
+    if (!s_boiler_mgr) {
         httpd_resp_set_status(req, "500 Internal Server Error");
         httpd_resp_send(req, "{\"error\":\"Boiler manager not available\"}", -1);
         return ESP_FAIL;
     }
     
-    const boiler_diagnostics_t *diag = boiler_manager_get_diagnostics(bm);
+    const boiler_diagnostics_t *diag = boiler_manager_get_diagnostics(s_boiler_mgr);
     if (!diag) {
         httpd_resp_set_status(req, "500 Internal Server Error");
         httpd_resp_send(req, "{\"error\":\"Diagnostics not available\"}", -1);
@@ -953,8 +949,13 @@ static esp_err_t ws_handler(httpd_req_t *req)
 }
 
 // Start WebSocket server
-esp_err_t websocket_server_start(websocket_server_t *ws_server)
+esp_err_t websocket_server_start(websocket_server_t *ws_server, boiler_manager_t *boiler_mgr)
 {
+    if (!boiler_mgr) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    s_boiler_mgr = boiler_mgr;
     memset(ws_server, 0, sizeof(websocket_server_t));
     
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();

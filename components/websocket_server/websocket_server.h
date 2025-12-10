@@ -9,6 +9,9 @@
 #include "esp_http_server.h"
 #include <stdint.h>
 
+// Forward declaration to avoid depending on main component
+typedef struct boiler_manager boiler_manager_t;
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -21,7 +24,7 @@ typedef struct {
 } websocket_server_t;
 
 // Initialize and start WebSocket server
-esp_err_t websocket_server_start(websocket_server_t *ws_server);
+esp_err_t websocket_server_start(websocket_server_t *ws_server, boiler_manager_t *boiler_mgr);
 
 // Stop WebSocket server
 void websocket_server_stop(websocket_server_t *ws_server);
