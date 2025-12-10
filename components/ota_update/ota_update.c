@@ -22,8 +22,6 @@ static const esp_partition_t *update_partition = NULL;
 static bool ota_in_progress = false;
 static size_t ota_bytes_written = 0;
 
-static const char *ota_styles = WEB_UI_OTA_STYLES;
-static const char *ota_body = WEB_UI_OTA_BODY;
 
 /**
  * GET /ota - OTA management page
@@ -35,7 +33,7 @@ static esp_err_t ota_page_handler(httpd_req_t *req)
     char *page = malloc(12288);  // 12KB should be enough
     if (page) {
         web_ui_build_nav(nav, sizeof(nav), WEB_NAV_OTA);
-        web_ui_render_page(page, 12288, "OTA Update - OpenTherm Gateway", ota_styles, nav, ota_body);
+        web_ui_render_page(page, 12288, "OTA Update - OpenTherm Gateway", WEB_UI_OTA_STYLES, nav, WEB_UI_OTA_BODY);
         httpd_resp_send(req, page, strlen(page));
         free(page);
         return ESP_OK;
