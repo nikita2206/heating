@@ -6,7 +6,7 @@
  */
 
 #include "opentherm_api.h"
-#include "OpenTherm.h"
+#include "opentherm_lib.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"

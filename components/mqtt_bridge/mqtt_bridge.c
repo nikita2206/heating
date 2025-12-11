@@ -24,6 +24,8 @@ static char topic_ch_enable_cmd[128];
 static char topic_ch_enable_state[128];
 static char topic_hb_cmd[128];
 static char topic_hb_state[128];
+static char topic_control_cmd[128];
+static char topic_control_state[128];
 
 static mqtt_bridge_state_t s_state;
 static SemaphoreHandle_t s_state_mutex;
@@ -31,7 +33,12 @@ static esp_mqtt_client_handle_t s_client;
 static mqtt_bridge_config_t s_cfg;
 static char topic_discovery_tset[160];
 static char topic_discovery_ch[160];
+static char topic_discovery_control[160];
 static int64_t s_last_override_ms = 0;
+
+// Control mode callback
+static mqtt_control_mode_callback_t s_control_callback = NULL;
+static void *s_control_callback_user_data = NULL;
 
 #define MQTT_HEARTBEAT_TIMEOUT_MS 90000
 
@@ -79,6 +86,19 @@ static void state_set_heartbeat(float hb)
     }
 }
 
+static void state_set_control(bool enabled)
+{
+    if (xSemaphoreTake(s_state_mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+        s_state.last_control_valid = true;
+        s_state.last_control_enabled = enabled;
+        xSemaphoreGive(s_state_mutex);
+    }
+    // Invoke callback outside mutex
+    if (s_control_callback) {
+        s_control_callback(enabled, s_control_callback_user_data);
+    }
+}
+
 static esp_err_t publish_state(esp_mqtt_client_handle_t client, const char *topic, const char *payload)
 {
     int msg_id = esp_mqtt_client_publish(client, topic, payload, 0, 1, 1); // qos1, retain
@@ -116,6 +136,11 @@ static void handle_message(esp_mqtt_event_handle_t event)
         float hb = strtof(payload, NULL);
         state_set_heartbeat(hb);
         publish_state(event->client, topic_hb_state, payload);
+    } else if (strcmp(topic, topic_control_cmd) == 0) {
+        bool on = (strcasecmp(payload, "on") == 0 || strcmp(payload, "1") == 0 || strcasecmp(payload, "true") == 0);
+        state_set_control(on);
+        ESP_LOGI(TAG, "Received Control Mode override: %s", on ? "ON" : "OFF");
+        publish_state(event->client, topic_control_state, on ? "ON" : "OFF");
     }
 }
 
@@ -131,6 +156,7 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
         esp_mqtt_client_subscribe(client, topic_tset_cmd, 1);
         esp_mqtt_client_subscribe(client, topic_ch_enable_cmd, 1);
         esp_mqtt_client_subscribe(client, topic_hb_cmd, 1);
+        esp_mqtt_client_subscribe(client, topic_control_cmd, 1);
         publish_discovery(client);
         break;
     case MQTT_EVENT_DISCONNECTED:
@@ -202,6 +228,27 @@ static void publish_discovery(esp_mqtt_client_handle_t client)
         "}",
         base_len, base, topic_ch_enable_cmd, topic_ch_enable_state, base_len, base);
     publish_state(client, topic_discovery_ch, payload_ch);
+
+    // Switch (Control Mode)
+    snprintf(topic_discovery_control, sizeof(topic_discovery_control), "%s/switch/%s_control/config", disc, base);
+    char payload_control[512];
+    snprintf(payload_control, sizeof(payload_control),
+        "{"
+        "\"name\":\"OT Control Mode\","
+        "\"uniq_id\":\"%.*s_control\","
+        "\"cmd_t\":\"%s\","
+        "\"stat_t\":\"%s\","
+        "\"pl_on\":\"ON\",\"pl_off\":\"OFF\","
+        "\"retain\":true,"
+        "\"dev\":{"
+            "\"ids\":[\"%.*s\"],"
+            "\"name\":\"OpenTherm Gateway\","
+            "\"mf\":\"OT Gateway\","
+            "\"mdl\":\"ESP32\""
+        "}"
+        "}",
+        base_len, base, topic_control_cmd, topic_control_state, base_len, base);
+    publish_state(client, topic_discovery_control, payload_control);
 
     // Heartbeat number
     char topic_discovery_hb[160];
@@ -398,6 +445,8 @@ esp_err_t mqtt_bridge_start(const mqtt_bridge_config_t *cfg, mqtt_bridge_state_t
     build_topic(topic_ch_enable_state, sizeof(topic_ch_enable_state), base, "ch_enable/state");
     build_topic(topic_hb_cmd, sizeof(topic_hb_cmd), base, "heartbeat/set");
     build_topic(topic_hb_state, sizeof(topic_hb_state), base, "heartbeat/state");
+    build_topic(topic_control_cmd, sizeof(topic_control_cmd), base, "control/set");
+    build_topic(topic_control_state, sizeof(topic_control_state), base, "control/state");
 
     esp_mqtt_client_config_t mqtt_cfg = {
         .broker = {
@@ -449,4 +498,23 @@ void mqtt_bridge_get_state(mqtt_bridge_state_t *out)
     }
 }
 
+void mqtt_bridge_set_control_callback(mqtt_control_mode_callback_t callback, void *user_data)
+{
+    s_control_callback = callback;
+    s_control_callback_user_data = user_data;
+}
 
+void mqtt_bridge_publish_control_state(bool enabled)
+{
+    if (!s_client || !s_state.connected) {
+        return;
+    }
+    // Update internal state
+    if (xSemaphoreTake(s_state_mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+        s_state.last_control_valid = true;
+        s_state.last_control_enabled = enabled;
+        xSemaphoreGive(s_state_mutex);
+    }
+    // Publish to MQTT
+    publish_state(s_client, topic_control_state, enabled ? "ON" : "OFF");
+}

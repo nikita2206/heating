@@ -19,6 +19,22 @@ static const char *TAG = "WebSocket";
 static boiler_manager_t *s_boiler_mgr = NULL;
 static websocket_server_t *s_ws_server = NULL;  // For callback access
 
+// Callback for MQTT control mode changes
+static void mqtt_control_mode_handler(bool enabled, void *user_data)
+{
+    (void)user_data;
+    if (!s_boiler_mgr) return;
+
+    ESP_LOGI(TAG, "MQTT control mode change: %s", enabled ? "ON" : "OFF");
+    if (enabled) {
+        boiler_manager_set_mode(s_boiler_mgr, BOILER_MANAGER_MODE_CONTROL);
+        boiler_manager_set_control_enabled(s_boiler_mgr, true);
+    } else {
+        boiler_manager_set_control_enabled(s_boiler_mgr, false);
+        boiler_manager_set_mode(s_boiler_mgr, BOILER_MANAGER_MODE_PASSTHROUGH);
+    }
+}
+
 // HTTP GET handler for root (dashboard)
 static esp_err_t root_handler(httpd_req_t *req)
 {
@@ -228,6 +244,8 @@ static esp_err_t control_mode_post_handler(httpd_req_t *req)
         boiler_manager_set_control_enabled(s_boiler_mgr, false);
         boiler_manager_set_mode(s_boiler_mgr, BOILER_MANAGER_MODE_PASSTHROUGH);
     }
+    // Sync state to MQTT
+    mqtt_bridge_publish_control_state(enable);
     httpd_resp_set_type(req, "application/json");
     httpd_resp_sendstr(req, "{\"status\":\"ok\"}");
     return ESP_OK;
@@ -595,6 +613,9 @@ esp_err_t websocket_server_start(websocket_server_t *ws_server, boiler_manager_t
 
     // Register message callback for logging boiler_manager communications
     boiler_manager_set_message_callback(boiler_mgr, boiler_manager_message_handler, ws_server);
+
+    // Register MQTT control mode callback
+    mqtt_bridge_set_control_callback(mqtt_control_mode_handler, NULL);
     
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.max_open_sockets = 7;

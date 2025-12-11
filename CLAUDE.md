@@ -89,3 +89,4 @@ Common Data IDs: 0=Status, 1=TSet, 17=Modulation, 25=Tboiler, 26=Tdhw, 28=Tretur
 - OpenTherm Protocol: https://www.opentherm.eu/
 - ESP-IDF Docs: https://docs.espressif.com/projects/esp-idf/
 - OpenTherm Library (original): https://github.com/ihormelnyk/opentherm_library
+- To run idf.py commands, export it to the shell first using `source ~/esp/v5.5.1/esp-idf/export.sh`

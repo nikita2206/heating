@@ -35,7 +35,16 @@ typedef struct {
     bool heartbeat_valid;
     float heartbeat_value;
     int64_t last_heartbeat_ms;
+    bool last_control_valid;
+    bool last_control_enabled;
 } mqtt_bridge_state_t;
+
+/**
+ * Callback for control mode changes from MQTT.
+ * @param enabled true to enable control mode, false to disable
+ * @param user_data User data passed during registration
+ */
+typedef void (*mqtt_control_mode_callback_t)(bool enabled, void *user_data);
 
 /**
  * Initialize and start MQTT bridge with the provided config.
@@ -72,6 +81,19 @@ esp_err_t mqtt_bridge_publish_sensor(const char *id, const char *name, const cha
  * Thread-safe snapshot of state.
  */
 void mqtt_bridge_get_state(mqtt_bridge_state_t *out);
+
+/**
+ * Register callback for control mode changes from MQTT.
+ * @param callback Callback function (NULL to unregister)
+ * @param user_data User data passed to callback
+ */
+void mqtt_bridge_set_control_callback(mqtt_control_mode_callback_t callback, void *user_data);
+
+/**
+ * Publish control mode state to MQTT (for syncing UI changes).
+ * @param enabled Current control mode state
+ */
+void mqtt_bridge_publish_control_state(bool enabled);
 
 #ifdef __cplusplus
 }

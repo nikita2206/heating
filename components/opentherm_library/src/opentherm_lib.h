@@ -1,5 +1,5 @@
 /*
-OpenTherm.h - OpenTherm Library for ESP-IDF platform
+opentherm_lib.h - OpenTherm Library for ESP-IDF platform
 Based on: https://github.com/ihormelnyk/OpenTherm
 Ported to ESP-IDF (removed Arduino dependencies)
 Licensed under MIT license

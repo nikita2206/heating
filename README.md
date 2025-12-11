@@ -203,8 +203,8 @@ project/
 │   │   └── CMakeLists.txt
 │   ├── opentherm_library/      # Pure ESP-IDF implementation
 │   │   ├── src/
-│   │   │   ├── OpenTherm.h
-│   │   │   └── OpenTherm.cpp
+│   │   │   ├── opentherm_lib.h
+│   │   │   └── opentherm_lib.cpp
 │   │   ├── idf_component.yml
 │   │   └── CMakeLists.txt
 │   ├── boiler_manager/         # Diagnostics and control

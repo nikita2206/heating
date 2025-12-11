@@ -1,10 +1,10 @@
 /*
-OpenTherm.cpp - OpenTherm Communication Library For ESP-IDF
+opentherm_lib.cpp - OpenTherm Communication Library For ESP-IDF
 Ported from Arduino version to pure ESP-IDF
 Copyright 2023, Ihor Melnyk
 */
 
-#include "OpenTherm.h"
+#include "opentherm_lib.h"
 #include "driver/gpio.h"
 #include "esp_timer.h"
 #include "esp_attr.h"
