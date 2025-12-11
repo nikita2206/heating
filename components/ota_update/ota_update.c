@@ -29,16 +29,16 @@ static size_t ota_bytes_written = 0;
 static esp_err_t ota_page_handler(httpd_req_t *req)
 {
     httpd_resp_set_type(req, "text/html");
-    char nav[256];
-    char *page = malloc(12288);  // 12KB should be enough
-    if (page) {
-        web_ui_build_nav(nav, sizeof(nav), WEB_NAV_OTA);
-        web_ui_render_page(page, 12288, "OTA Update - OpenTherm Gateway", WEB_UI_OTA_STYLES, nav, WEB_UI_OTA_BODY);
-        httpd_resp_send(req, page, strlen(page));
-        free(page);
-        return ESP_OK;
+    char nav[WEB_UI_NAV_MAX_LEN];
+    web_ui_build_nav(nav, sizeof(nav), WEB_NAV_OTA);
+    size_t page_len = 0;
+    char *page = web_ui_alloc_page(0, &page_len, "OTA Update - OpenTherm Gateway", WEB_UI_OTA_STYLES, nav, WEB_UI_OTA_BODY);
+    if (!page) {
+        return httpd_resp_send_500(req);
     }
-    return httpd_resp_send_500(req);
+    httpd_resp_send(req, page, page_len);
+    free(page);
+    return ESP_OK;
 }
 
 /**

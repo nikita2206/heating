@@ -2,6 +2,8 @@
 
 #include <stddef.h>
 #include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 
 // Common CSS shared across all web pages
 static const char WEB_UI_COMMON_STYLES[] =
@@ -52,6 +54,10 @@ static const char WEB_UI_NAV_TEMPLATE[] =
     "<a href='/ota' class='%s'>OTA Update</a>"
     "</div></nav>";
 
+// Enough room for the full nav + all "active" classes and terminator
+#define WEB_UI_NAV_MAX_LEN 512
+#define WEB_UI_PAGE_DEFAULT_CAP 32768
+
 static inline void web_ui_build_nav(char *out, size_t out_sz, web_nav_page_t active)
 {
     const char *dashboard = active == WEB_NAV_DASHBOARD ? "active" : "";
@@ -79,5 +85,63 @@ static inline int web_ui_render_page(char *out,
                     page_styles ? page_styles : "",
                     nav_html ? nav_html : "",
                     body_html ? body_html : "");
+}
+
+// Allocate a page buffer sized to the provided parts. Returns malloc'd buffer
+// (caller must free) or NULL on size/capacity errors. A cap lets us avoid
+// unbounded allocations if a caller passes unexpected input sizes.
+static inline char *web_ui_alloc_page(size_t cap_max,
+                                      size_t *out_len,
+                                      const char *title,
+                                      const char *page_styles,
+                                      const char *nav_html,
+                                      const char *body_html)
+{
+    if (cap_max == 0) {
+        cap_max = WEB_UI_PAGE_DEFAULT_CAP;
+    }
+
+    const size_t len_title = title ? strlen(title) : 0;
+    const size_t len_common = sizeof(WEB_UI_COMMON_STYLES) - 1;
+    const size_t len_styles = page_styles ? strlen(page_styles) : 0;
+    const size_t len_nav = nav_html ? strlen(nav_html) : 0;
+    const size_t len_body = body_html ? strlen(body_html) : 0;
+
+    // Constant HTML wrappers (without placeholders)
+    static const char prefix1[] = "<!DOCTYPE html><html><head><meta charset='UTF-8'><meta name='viewport' content='width=device-width,initial-scale=1'><title>";
+    static const char prefix2[] = "</title><style>";
+    static const char prefix3[] = "</style></head><body>";
+    static const char suffix[] = "</body></html>";
+
+    size_t total = strlen(prefix1) + len_title +
+                   strlen(prefix2) + len_common + len_styles +
+                   strlen(prefix3) + len_nav + len_body +
+                   strlen(suffix);
+
+    if (total + 1 > cap_max) {
+        return NULL;
+    }
+
+    char *buf = (char *)malloc(total + 1);
+    if (!buf) {
+        return NULL;
+    }
+
+    char *p = buf;
+    memcpy(p, prefix1, strlen(prefix1)); p += strlen(prefix1);
+    if (len_title) { memcpy(p, title, len_title); p += len_title; }
+    memcpy(p, prefix2, strlen(prefix2)); p += strlen(prefix2);
+    memcpy(p, WEB_UI_COMMON_STYLES, len_common); p += len_common;
+    if (len_styles) { memcpy(p, page_styles, len_styles); p += len_styles; }
+    memcpy(p, prefix3, strlen(prefix3)); p += strlen(prefix3);
+    if (len_nav) { memcpy(p, nav_html, len_nav); p += len_nav; }
+    if (len_body) { memcpy(p, body_html, len_body); p += len_body; }
+    memcpy(p, suffix, strlen(suffix)); p += strlen(suffix);
+    *p = '\0';
+
+    if (out_len) {
+        *out_len = total;
+    }
+    return buf;
 }
 

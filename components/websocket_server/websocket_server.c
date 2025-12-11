@@ -22,48 +22,48 @@ static boiler_manager_t *s_boiler_mgr = NULL;
 static esp_err_t root_handler(httpd_req_t *req)
 {
     httpd_resp_set_type(req, "text/html");
-    char nav[256];
-    char *page = malloc(8192);
-    if (page) {
-        web_ui_build_nav(nav, sizeof(nav), WEB_NAV_DASHBOARD);
-        web_ui_render_page(page, 8192, "OpenTherm Gateway", WEB_UI_DASHBOARD_STYLES, nav, WEB_UI_DASHBOARD_BODY);
-        httpd_resp_send(req, page, strlen(page));
-        free(page);
-        return ESP_OK;
+    char nav[WEB_UI_NAV_MAX_LEN];
+    web_ui_build_nav(nav, sizeof(nav), WEB_NAV_DASHBOARD);
+    size_t page_len = 0;
+    char *page = web_ui_alloc_page(0, &page_len, "OpenTherm Gateway", WEB_UI_DASHBOARD_STYLES, nav, WEB_UI_DASHBOARD_BODY);
+    if (!page) {
+        return httpd_resp_send_500(req);
     }
-    return httpd_resp_send_500(req);
+    httpd_resp_send(req, page, page_len);
+    free(page);
+    return ESP_OK;
 }
 
 // HTTP GET handler for logs page
 static esp_err_t logs_handler(httpd_req_t *req)
 {
     httpd_resp_set_type(req, "text/html");
-    char nav[256];
-    char *page = malloc(8192);
-    if (page) {
-        web_ui_build_nav(nav, sizeof(nav), WEB_NAV_LOGS);
-        web_ui_render_page(page, 8192, "Logs - OpenTherm Gateway", WEB_UI_LOGS_STYLES, nav, WEB_UI_LOGS_BODY);
-        httpd_resp_send(req, page, strlen(page));
-        free(page);
-        return ESP_OK;
+    char nav[WEB_UI_NAV_MAX_LEN];
+    web_ui_build_nav(nav, sizeof(nav), WEB_NAV_LOGS);
+    size_t page_len = 0;
+    char *page = web_ui_alloc_page(0, &page_len, "Logs - OpenTherm Gateway", WEB_UI_LOGS_STYLES, nav, WEB_UI_LOGS_BODY);
+    if (!page) {
+        return httpd_resp_send_500(req);
     }
-    return httpd_resp_send_500(req);
+    httpd_resp_send(req, page, page_len);
+    free(page);
+    return ESP_OK;
 }
 
 // HTTP GET handler for write page
 static esp_err_t write_handler(httpd_req_t *req)
 {
     httpd_resp_set_type(req, "text/html");
-    char nav[256];
-    char *page = malloc(16384);
-    if (page) {
-        web_ui_build_nav(nav, sizeof(nav), WEB_NAV_WRITE);
-        web_ui_render_page(page, 16384, "Manual Write - OpenTherm Gateway", WEB_UI_WRITE_STYLES, nav, WEB_UI_WRITE_BODY);
-        httpd_resp_send(req, page, strlen(page));
-        free(page);
-        return ESP_OK;
+    char nav[WEB_UI_NAV_MAX_LEN];
+    web_ui_build_nav(nav, sizeof(nav), WEB_NAV_WRITE);
+    size_t page_len = 0;
+    char *page = web_ui_alloc_page(0, &page_len, "Manual Write - OpenTherm Gateway", WEB_UI_WRITE_STYLES, nav, WEB_UI_WRITE_BODY);
+    if (!page) {
+        return httpd_resp_send_500(req);
     }
-    return httpd_resp_send_500(req);
+    httpd_resp_send(req, page, page_len);
+    free(page);
+    return ESP_OK;
 }
 
 // MQTT state API
@@ -236,32 +236,32 @@ static esp_err_t control_mode_post_handler(httpd_req_t *req)
 static esp_err_t diagnostics_handler(httpd_req_t *req)
 {
     httpd_resp_set_type(req, "text/html");
-    char nav[256];
-    char *page = malloc(16384);
-    if (page) {
-        web_ui_build_nav(nav, sizeof(nav), WEB_NAV_DIAGNOSTICS);
-        web_ui_render_page(page, 16384, "Diagnostics - OpenTherm Gateway", WEB_UI_DIAGNOSTICS_STYLES, nav, WEB_UI_DIAGNOSTICS_BODY);
-        httpd_resp_send(req, page, strlen(page));
-        free(page);
-        return ESP_OK;
+    char nav[WEB_UI_NAV_MAX_LEN];
+    web_ui_build_nav(nav, sizeof(nav), WEB_NAV_DIAGNOSTICS);
+    size_t page_len = 0;
+    char *page = web_ui_alloc_page(0, &page_len, "Diagnostics - OpenTherm Gateway", WEB_UI_DIAGNOSTICS_STYLES, nav, WEB_UI_DIAGNOSTICS_BODY);
+    if (!page) {
+        return httpd_resp_send_500(req);
     }
-    return httpd_resp_send_500(req);
+    httpd_resp_send(req, page, page_len);
+    free(page);
+    return ESP_OK;
 }
 
 // MQTT config page handler
 static esp_err_t mqtt_page_handler(httpd_req_t *req)
 {
     httpd_resp_set_type(req, "text/html");
-    char nav[256];
-    char *page = malloc(8192);
-    if (page) {
-        web_ui_build_nav(nav, sizeof(nav), WEB_NAV_MQTT);
-        web_ui_render_page(page, 8192, "MQTT - OpenTherm Gateway", WEB_UI_MQTT_STYLES, nav, WEB_UI_MQTT_BODY);
-        httpd_resp_send(req, page, strlen(page));
-        free(page);
-        return ESP_OK;
+    char nav[WEB_UI_NAV_MAX_LEN];
+    web_ui_build_nav(nav, sizeof(nav), WEB_NAV_MQTT);
+    size_t page_len = 0;
+    char *page = web_ui_alloc_page(0, &page_len, "MQTT - OpenTherm Gateway", WEB_UI_MQTT_STYLES, nav, WEB_UI_MQTT_BODY);
+    if (!page) {
+        return httpd_resp_send_500(req);
     }
-    return httpd_resp_send_500(req);
+    httpd_resp_send(req, page, page_len);
+    free(page);
+    return ESP_OK;
 }
 
 // API handler for manual WRITE_DATA frame injection
