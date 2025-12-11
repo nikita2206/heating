@@ -33,12 +33,14 @@ void websocket_server_stop(websocket_server_t *ws_server);
 esp_err_t websocket_server_send_text(websocket_server_t *ws_server, const char *text);
 
 // Send JSON formatted OpenTherm message
-esp_err_t websocket_server_send_opentherm_message(websocket_server_t *ws_server, 
+// source: "THERMOSTAT_BOILER", "GATEWAY_BOILER", or "THERMOSTAT_GATEWAY"
+esp_err_t websocket_server_send_opentherm_message(websocket_server_t *ws_server,
                                                    const char *direction,
                                                    uint32_t message,
                                                    const char *msg_type,
                                                    uint8_t data_id,
-                                                   uint16_t data_value);
+                                                   uint16_t data_value,
+                                                   const char *source);
 
 // Get HTTP server handle (for registering additional handlers like OTA)
 httpd_handle_t websocket_server_get_handle(websocket_server_t *ws_server);

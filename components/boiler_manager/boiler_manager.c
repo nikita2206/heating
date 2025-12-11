@@ -14,6 +14,14 @@
 static const char *TAG = "BoilerManager";
 
 #define CONTROL_APPLY_INTERVAL_MS 5000
+
+// Helper to invoke message callback if registered
+static inline void log_message(boiler_manager_t *bm, const char *direction,
+                               ot_message_source_t source, uint32_t message) {
+    if (bm && bm->message_callback) {
+        bm->message_callback(direction, source, message, bm->message_callback_user_data);
+    }
+}
 #define CONTROL_MQTT_STALE_MS 45000
 #define CONTROL_DIAG_INTERVAL_MS 1000
 
@@ -118,11 +126,17 @@ static void poll_next_diag(boiler_manager_t *bm)
     diag_request.data = ot_build_request(OT_MSGTYPE_READ_DATA, cmd->data_id, 0);
 
     ESP_LOGD(TAG, "Sending diagnostic query for ID %d (%s)", cmd->data_id, cmd->name);
-    
+
+    // Log the request we're sending to the boiler
+    log_message(bm, "REQUEST", OT_SOURCE_GATEWAY_BOILER, diag_request.data);
+
     ot_message_t diag_response;
     esp_err_t ret = ot_send_request_to_boiler(bm->ot_instance, diag_request, &diag_response, 800);
-    
+
     if (ret == ESP_OK) {
+        // Log the response from the boiler
+        log_message(bm, "RESPONSE", OT_SOURCE_GATEWAY_BOILER, diag_response.data);
+
         if (ot_check_parity(diag_response.data) &&
             ot_get_data_id(diag_response.data) == cmd->data_id) {
             parse_diagnostic_response(bm, cmd->data_id, diag_response.data);
@@ -352,17 +366,23 @@ bool boiler_manager_request_interceptor(ot_handle_t *ot, ot_message_t *request, 
     // PRIORITY 1: Manual writes (allowed in proxy/control)
     if (bm->manual_write_pending) {
         ESP_LOGI(TAG, "Processing manual write frame: 0x%08lX", (unsigned long)bm->manual_write_frame);
-        
+
         ot_message_t write_request = {bm->manual_write_frame};
         ot_message_t write_response;
-        
+
+        // Log the manual write request
+        log_message(bm, "REQUEST", OT_SOURCE_GATEWAY_BOILER, write_request.data);
+
         esp_err_t ret = ot_send_request_to_boiler(bm->ot_instance, write_request, &write_response, 800);
-        
+
         if (ret == ESP_OK) {
+            // Log the response from boiler
+            log_message(bm, "RESPONSE", OT_SOURCE_GATEWAY_BOILER, write_response.data);
+
             uint8_t write_data_id = ot_get_data_id(bm->manual_write_frame);
             if (ot_check_parity(write_response.data) &&
                 ot_get_data_id(write_response.data) == write_data_id) {
-                
+
                 ot_message_type_t response_type = ot_get_message_type(write_response.data);
                 if (response_type == OT_MSGTYPE_WRITE_ACK) {
                     ESP_LOGI(TAG, "Manual write ACK: 0x%08lX", (unsigned long)write_response.data);
@@ -392,7 +412,7 @@ bool boiler_manager_request_interceptor(ot_handle_t *ot, ot_message_t *request, 
             ESP_LOGW(TAG, "Manual write timeout/error: %s", esp_err_to_name(ret));
             bm->manual_write_result = ret;
         }
-        
+
         bm->manual_write_pending = false;
         if (bm->manual_write_sem) {
             xSemaphoreGive(bm->manual_write_sem);
@@ -428,6 +448,10 @@ bool boiler_manager_request_interceptor(ot_handle_t *ot, ot_message_t *request, 
         if (resp_frame != 0) {
             // Send control response to thermostat
             ot_message_t control_response = {resp_frame};
+
+            // Log the response we're sending to thermostat (gateway acting as boiler)
+            log_message(bm, "RESPONSE", OT_SOURCE_THERMOSTAT_GATEWAY, control_response.data);
+
             esp_err_t ret = ot_send_response_to_thermostat(bm->ot_instance, control_response);
             if (ret != ESP_OK) {
                 ESP_LOGW(TAG, "Failed to send control response: %s", esp_err_to_name(ret));
@@ -465,10 +489,16 @@ bool boiler_manager_request_interceptor(ot_handle_t *ot, ot_message_t *request, 
 
         ESP_LOGI(TAG, "Injecting diagnostic command: %s (ID=%d)", cmd->name, cmd->data_id);
 
+        // Log the diagnostic request to boiler
+        log_message(bm, "REQUEST", OT_SOURCE_GATEWAY_BOILER, diag_request.data);
+
         ot_message_t diag_response;
         esp_err_t ret = ot_send_request_to_boiler(bm->ot_instance, diag_request, &diag_response, 800);
-        
+
         if (ret == ESP_OK) {
+            // Log the response from boiler
+            log_message(bm, "RESPONSE", OT_SOURCE_GATEWAY_BOILER, diag_response.data);
+
             if (ot_check_parity(diag_response.data) &&
                 ot_get_data_id(diag_response.data) == cmd->data_id) {
                 parse_diagnostic_response(bm, cmd->data_id, diag_response.data);
@@ -485,6 +515,10 @@ bool boiler_manager_request_interceptor(ot_handle_t *ot, ot_message_t *request, 
             uint16_t status = build_status_word(bm->demand_ch_enabled);
             ot_message_t control_response;
             control_response.data = ot_build_response(OT_MSGTYPE_READ_ACK, OT_MSGID_STATUS, status);
+
+            // Log the stub response to thermostat
+            log_message(bm, "RESPONSE", OT_SOURCE_THERMOSTAT_GATEWAY, control_response.data);
+
             ot_send_response_to_thermostat(bm->ot_instance, control_response);
         }
 
@@ -536,16 +570,22 @@ esp_err_t boiler_manager_inject_command(boiler_manager_t *bm, uint8_t data_id)
     if (!bm) {
         return ESP_ERR_INVALID_ARG;
     }
-    
+
     ot_message_t request;
     request.data = ot_build_request(OT_MSGTYPE_READ_DATA, data_id, 0);
-    
+
     ESP_LOGI(TAG, "Injecting diagnostic command ID %d", data_id);
-    
+
+    // Log the injected request
+    log_message(bm, "REQUEST", OT_SOURCE_GATEWAY_BOILER, request.data);
+
     ot_message_t response;
     esp_err_t ret = ot_send_request_to_boiler(bm->ot_instance, request, &response, 800);
-    
+
     if (ret == ESP_OK) {
+        // Log the response
+        log_message(bm, "RESPONSE", OT_SOURCE_GATEWAY_BOILER, response.data);
+
         parse_diagnostic_response(bm, data_id, response.data);
         ESP_LOGI(TAG, "Diagnostic command ID %d response: 0x%08lX", data_id, (unsigned long)response.data);
     } else {
@@ -633,4 +673,13 @@ void boiler_manager_set_mode(boiler_manager_t *bm, boiler_manager_mode_t mode)
     bm->control_enabled = (mode == BOILER_MANAGER_MODE_CONTROL) ? bm->control_enabled : false;
     bm->control_active = false;
     bm->fallback_active = false;
+}
+
+void boiler_manager_set_message_callback(boiler_manager_t *bm,
+                                         boiler_manager_message_callback_t callback,
+                                         void *user_data)
+{
+    if (!bm) return;
+    bm->message_callback = callback;
+    bm->message_callback_user_data = user_data;
 }

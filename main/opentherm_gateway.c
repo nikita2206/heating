@@ -182,12 +182,14 @@ static void opentherm_message_callback(ot_handle_t *handle, ot_message_t *messag
              (unsigned long)message->data);
     
     // Send to WebSocket clients for remote monitoring
+    // Source is "THERMOSTAT_BOILER" since these are proxied messages
     websocket_server_send_opentherm_message(&ws_server,
                                             direction,
                                             message->data,
                                             ot_message_type_to_string(msg_type),
                                             data_id,
-                                            data_value);
+                                            data_value,
+                                            "THERMOSTAT_BOILER");
 }
 
 /**

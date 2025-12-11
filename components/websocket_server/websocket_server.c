@@ -17,6 +17,7 @@
 
 static const char *TAG = "WebSocket";
 static boiler_manager_t *s_boiler_mgr = NULL;
+static websocket_server_t *s_ws_server = NULL;  // For callback access
 
 // HTTP GET handler for root (dashboard)
 static esp_err_t root_handler(httpd_req_t *req)
@@ -545,6 +546,42 @@ static esp_err_t ws_handler(httpd_req_t *req)
     return ESP_OK;
 }
 
+// Callback handler for boiler_manager messages (diagnostics, control responses)
+static void boiler_manager_message_handler(const char *direction,
+                                           ot_message_source_t source,
+                                           uint32_t message,
+                                           void *user_data)
+{
+    (void)user_data;  // We use s_ws_server instead
+
+    if (!s_ws_server) return;
+
+    const char *source_str;
+    switch (source) {
+        case OT_SOURCE_GATEWAY_BOILER:
+            source_str = "GATEWAY_BOILER";
+            break;
+        case OT_SOURCE_THERMOSTAT_GATEWAY:
+            source_str = "THERMOSTAT_GATEWAY";
+            break;
+        default:
+            source_str = "THERMOSTAT_BOILER";
+            break;
+    }
+
+    ot_message_type_t msg_type = ot_get_message_type(message);
+    uint8_t data_id = ot_get_data_id(message);
+    uint16_t data_value = ot_get_uint16(message);
+
+    websocket_server_send_opentherm_message(s_ws_server,
+                                            direction,
+                                            message,
+                                            ot_message_type_to_string(msg_type),
+                                            data_id,
+                                            data_value,
+                                            source_str);
+}
+
 // Start WebSocket server
 esp_err_t websocket_server_start(websocket_server_t *ws_server, boiler_manager_t *boiler_mgr)
 {
@@ -553,7 +590,11 @@ esp_err_t websocket_server_start(websocket_server_t *ws_server, boiler_manager_t
     }
 
     s_boiler_mgr = boiler_mgr;
+    s_ws_server = ws_server;  // Store for callback access
     memset(ws_server, 0, sizeof(websocket_server_t));
+
+    // Register message callback for logging boiler_manager communications
+    boiler_manager_set_message_callback(boiler_mgr, boiler_manager_message_handler, ws_server);
     
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.max_open_sockets = 7;
@@ -730,15 +771,17 @@ esp_err_t websocket_server_send_opentherm_message(websocket_server_t *ws_server,
                                                    uint32_t message,
                                                    const char *msg_type,
                                                    uint8_t data_id,
-                                                   uint16_t data_value)
+                                                   uint16_t data_value,
+                                                   const char *source)
 {
     char json_buffer[512];
     int64_t timestamp = esp_timer_get_time() / 1000;  // Convert to milliseconds
-    
+
     snprintf(json_buffer, sizeof(json_buffer),
-             "{\"timestamp\":%lld,\"direction\":\"%s\",\"message\":%lu,\"msg_type\":\"%s\",\"data_id\":%u,\"data_value\":%u}",
-             timestamp, direction, (unsigned long)message, msg_type, data_id, data_value);
-    
+             "{\"timestamp\":%lld,\"direction\":\"%s\",\"source\":\"%s\",\"message\":%lu,\"msg_type\":\"%s\",\"data_id\":%u,\"data_value\":%u}",
+             timestamp, direction, source ? source : "THERMOSTAT_BOILER",
+             (unsigned long)message, msg_type, data_id, data_value);
+
     return websocket_server_send_text(ws_server, json_buffer);
 }
 

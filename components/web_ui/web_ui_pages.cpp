@@ -237,10 +237,40 @@ constexpr char logs_styles_formatted[] = R"(
         background: rgba(124, 58, 237, 0.05);
     }
 
+    .log-entry.gateway-boiler {
+        border-left: 3px solid #10b981;
+    }
+
+    .log-entry.thermostat-gateway {
+        border-left: 3px solid #8b5cf6;
+    }
+
     .log-time {
         color: var(--muted);
         font-size: 11px;
         white-space: nowrap;
+    }
+
+    .log-source {
+        font-size: 10px;
+        padding: 2px 6px;
+        border-radius: 4px;
+        white-space: nowrap;
+    }
+
+    .log-source.thermostat-boiler {
+        background: rgba(59, 130, 246, 0.2);
+        color: #3b82f6;
+    }
+
+    .log-source.gateway-boiler {
+        background: rgba(16, 185, 129, 0.2);
+        color: #10b981;
+    }
+
+    .log-source.thermostat-gateway {
+        background: rgba(139, 92, 246, 0.2);
+        color: #8b5cf6;
     }
 
     .log-dir {
@@ -292,6 +322,31 @@ constexpr char logs_styles_formatted[] = R"(
         box-shadow: 0 0 8px var(--accent);
     }
 
+    .filter-group {
+        display: flex;
+        gap: 8px;
+        align-items: center;
+    }
+
+    .filter-select {
+        padding: 6px 10px;
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        background: var(--bg);
+        color: var(--text);
+        font-size: 13px;
+    }
+
+    .filter-input {
+        padding: 6px 10px;
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        background: var(--bg);
+        color: var(--text);
+        font-size: 13px;
+        width: 80px;
+    }
+
     .msg-count {
         color: var(--muted);
         font-size: 13px;
@@ -309,6 +364,15 @@ constexpr char logs_body_formatted[] = R"(
                     <div class='status-dot' id='status-dot'></div>
                     <span id='status-text'>Disconnected</span>
                 </div>
+                <div class='filter-group'>
+                    <select class='filter-select' id='source-filter' onchange='applyFilters()'>
+                        <option value='all'>All Sources</option>
+                        <option value='THERMOSTAT_BOILER'>T&#x2194;B Proxied</option>
+                        <option value='GATEWAY_BOILER'>G&#x2194;B Gateway</option>
+                        <option value='THERMOSTAT_GATEWAY'>T&#x2194;G Control</option>
+                    </select>
+                    <input type='number' class='filter-input' id='dataid-filter' placeholder='ID' min='0' max='255' onchange='applyFilters()'>
+                </div>
                 <button class='btn btn-secondary' onclick='togglePause()' id='pause-btn'>Pause</button>
                 <button class='btn btn-danger' onclick='clearLogs()'>Clear</button>
                 <span class='msg-count'><span id='msg-count'>0</span>&nbsp;messages</span>
@@ -318,6 +382,9 @@ constexpr char logs_body_formatted[] = R"(
     </div>
     <script>
         let ws, logs = document.getElementById('logs'), paused = false, msgCount = 0;
+        let allMessages = [];
+        let sourceFilter = 'all';
+        let dataIdFilter = null;
 
         function connect() {
             ws = new WebSocket('ws://' + window.location.host + '/ws');
@@ -334,26 +401,52 @@ constexpr char logs_body_formatted[] = R"(
                 if (paused) return;
                 msgCount++;
                 document.getElementById('msg-count').textContent = msgCount;
-                let div = document.createElement('div');
-                let ts = new Date().toLocaleTimeString('en-GB', {hour12: false});
                 try {
                     let d = JSON.parse(e.data);
-                    div.className = 'log-entry ' + d.direction.toLowerCase();
-                    div.innerHTML = '<span class="log-time">' + ts + '</span>' +
-                        '<span class="log-dir ' + d.direction.toLowerCase() + '">' + d.direction + '</span>' +
-                        '<span class="log-content">' + d.msg_type + ' | ID: ' + d.data_id +
-                        ' | Value: ' + d.data_value +
-                        ' <span class="log-raw">0x' + d.message.toString(16).toUpperCase().padStart(8, '0') +
-                        '</span></span>';
+                    allMessages.push({data: d, timestamp: new Date()});
+                    if (allMessages.length > 500) allMessages.shift();
+                    if (!passesFilter(d)) return;
+                    appendLogEntry(d);
                 } catch (err) {
+                    let div = document.createElement('div');
+                    let ts = new Date().toLocaleTimeString('en-GB', {hour12: false});
                     div.className = 'log-entry status';
-                    div.innerHTML = '<span class="log-time">' + ts + '</span>' +
-                        '<span class="log-content">' + e.data + '</span>';
+                    div.innerHTML = '<span class="log-time">' + ts + '</span><span class="log-content">' + e.data + '</span>';
+                    logs.appendChild(div);
+                    if (logs.children.length > 500) logs.removeChild(logs.firstChild);
+                    logs.scrollTop = logs.scrollHeight;
                 }
-                logs.appendChild(div);
-                if (logs.children.length > 500) logs.removeChild(logs.firstChild);
-                logs.scrollTop = logs.scrollHeight;
             };
+        }
+
+        function passesFilter(d) {
+            if (sourceFilter !== 'all' && d.source !== sourceFilter) return false;
+            if (dataIdFilter !== null && d.data_id !== dataIdFilter) return false;
+            return true;
+        }
+
+        function appendLogEntry(d) {
+            let div = document.createElement('div');
+            let ts = new Date().toLocaleTimeString('en-GB', {hour12: false});
+            let src = (d.source || 'THERMOSTAT_BOILER').toLowerCase().replace(/_/g, '-');
+            let srcLabel = {'thermostat-boiler':'T&#x2194;B', 'gateway-boiler':'G&#x2194;B', 'thermostat-gateway':'T&#x2194;G'}[src] || 'T&#x2194;B';
+            div.className = 'log-entry ' + (d.direction || '').toLowerCase() + ' ' + src;
+            div.innerHTML = '<span class="log-time">' + ts + '</span>' +
+                '<span class="log-source ' + src + '">' + srcLabel + '</span>' +
+                '<span class="log-dir ' + (d.direction || '').toLowerCase() + '">' + (d.direction || '') + '</span>' +
+                '<span class="log-content">' + d.msg_type + ' | ID: ' + d.data_id + ' | Value: ' + d.data_value +
+                ' <span class="log-raw">0x' + d.message.toString(16).toUpperCase().padStart(8, '0') + '</span></span>';
+            logs.appendChild(div);
+            if (logs.children.length > 500) logs.removeChild(logs.firstChild);
+            logs.scrollTop = logs.scrollHeight;
+        }
+
+        function applyFilters() {
+            sourceFilter = document.getElementById('source-filter').value;
+            let idVal = document.getElementById('dataid-filter').value;
+            dataIdFilter = idVal !== '' ? parseInt(idVal) : null;
+            logs.innerHTML = '';
+            allMessages.forEach(msg => { if (passesFilter(msg.data)) appendLogEntry(msg.data); });
         }
 
         function togglePause() {
@@ -363,6 +456,7 @@ constexpr char logs_body_formatted[] = R"(
 
         function clearLogs() {
             logs.innerHTML = '';
+            allMessages = [];
             msgCount = 0;
             document.getElementById('msg-count').textContent = '0';
         }

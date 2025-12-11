@@ -27,6 +27,24 @@ typedef enum {
     BOILER_MANAGER_MODE_CONTROL       // Apply MQTT overrides, stub thermostat replies
 } boiler_manager_mode_t;
 
+// Message source categories for logging
+typedef enum {
+    OT_SOURCE_THERMOSTAT_BOILER,    // Proxied: Thermostat <-> Boiler (via gateway passthrough)
+    OT_SOURCE_GATEWAY_BOILER,       // Gateway <-> Boiler (diagnostics, manual writes)
+    OT_SOURCE_THERMOSTAT_GATEWAY    // Thermostat <-> Gateway (control mode responses)
+} ot_message_source_t;
+
+// Forward declaration
+typedef struct boiler_manager boiler_manager_t;
+
+// Callback for message logging (invoked when boiler_manager sends/receives messages)
+typedef void (*boiler_manager_message_callback_t)(
+    const char *direction,          // "REQUEST" or "RESPONSE"
+    ot_message_source_t source,     // Communication pair
+    uint32_t message,               // Raw 32-bit OpenTherm frame
+    void *user_data
+);
+
 // Diagnostic value with timestamp
 typedef struct {
     float value;
@@ -91,7 +109,7 @@ typedef struct {
 } boiler_diagnostics_t;
 
 // Boiler manager instance
-typedef struct boiler_manager {
+struct boiler_manager {
     boiler_manager_mode_t mode;
     boiler_diagnostics_t diagnostics;
     bool control_enabled;       // user toggle
@@ -102,31 +120,35 @@ typedef struct boiler_manager {
     int64_t last_demand_ms;
     int64_t last_control_apply_ms;
     int64_t last_diag_poll_ms;
-    
+
     // Diagnostic command rotation
     const boiler_diagnostic_cmd_t *diag_commands;
     size_t diag_commands_count;
     size_t diag_commands_index;
-    
+
     // State for ID=0 interception
     bool intercepting_id0;
     ot_message_t pending_diag_request;
     int64_t diag_request_time_ms;
-    
+
     // ID=0 interception rate control
     uint32_t intercept_rate;      // Intercept every Nth ID=0 frame (e.g., 10 = intercept 1 in 10)
     uint32_t id0_frame_counter;   // Counter for ID=0 frames seen
-    
+
     // Manual write frame injection (queued, injected via interceptor)
     bool manual_write_pending;    // True if a manual write frame is queued
     uint32_t manual_write_frame;  // The frame to inject
     uint32_t manual_write_response; // Response frame (set by interceptor)
     esp_err_t manual_write_result; // Result code (set by interceptor)
     SemaphoreHandle_t manual_write_sem; // Semaphore to signal completion
-    
+
     // Reference to OpenTherm instance (generic API)
     ot_handle_t *ot_instance;
-} boiler_manager_t;
+
+    // Message logging callback
+    boiler_manager_message_callback_t message_callback;
+    void *message_callback_user_data;
+};
 
 typedef struct {
     bool control_enabled;
@@ -197,6 +219,17 @@ void boiler_manager_set_control_enabled(boiler_manager_t *bm, bool enabled);
 void boiler_manager_get_status(boiler_manager_t *bm, boiler_manager_status_t *out);
 
 void boiler_manager_set_mode(boiler_manager_t *bm, boiler_manager_mode_t mode);
+
+/**
+ * Set message callback for logging
+ *
+ * @param bm Boiler manager instance
+ * @param callback Callback function (NULL to disable)
+ * @param user_data User data passed to callback
+ */
+void boiler_manager_set_message_callback(boiler_manager_t *bm,
+                                         boiler_manager_message_callback_t callback,
+                                         void *user_data);
 
 #ifdef __cplusplus
 }
