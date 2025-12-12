@@ -400,7 +400,7 @@ static void opentherm_gateway_task(void *pvParameters)
 
 void app_main(void)
 {
-    ESP_LOGI(TAG, "OpenTherm Gateway starting (RMT implementation)...");
+    ESP_LOGI(TAG, "OpenTherm Gateway starting...");
     ESP_LOGI(TAG, "Firmware version: %s", ota_update_get_version());
     
     // Validate OTA state early - handles rollback verification

@@ -28,6 +28,7 @@ struct ot_context {
     
     // State
     volatile bool request_pending;
+    volatile bool request_notified;  // Tracks if message callback was called for this request
     volatile uint32_t pending_request;
     volatile bool timeout_flag;
     
@@ -59,6 +60,16 @@ static void IRAM_ATTR thermostat_interrupt_handler() {
 static void IRAM_ATTR boiler_interrupt_handler() {
     if (g_ctx && g_ctx->boiler_if) {
         g_ctx->boiler_if->handleInterrupt();
+    }
+}
+
+// Request callback for thermostat side (slave mode receives requests)
+static void thermostat_request_callback(unsigned long request, OpenThermResponseStatus status) {
+    if (g_ctx && status == OpenThermResponseStatus::SUCCESS) {
+        g_ctx->pending_request = request;
+        g_ctx->request_pending = true;
+        g_ctx->request_notified = false;  // New request, not yet notified
+        g_ctx->rx_count++;
     }
 }
 
@@ -124,15 +135,15 @@ ot_handle_t* ot_init(ot_pin_config_t config) {
 
 esp_err_t ot_start(ot_handle_t* handle) {
     if (!handle) return ESP_ERR_INVALID_ARG;
-    
+
     ESP_LOGI(TAG, "Starting OpenTherm communication");
-    
-    // Begin thermostat interface (slave mode)
-    handle->thermostat_if->begin(thermostat_interrupt_handler);
-    
+
+    // Begin thermostat interface (slave mode) with request callback
+    handle->thermostat_if->begin(thermostat_interrupt_handler, thermostat_request_callback);
+
     // Begin boiler interface (master mode) with response callback
     handle->boiler_if->begin(boiler_interrupt_handler, boiler_response_callback);
-    
+
     ESP_LOGI(TAG, "OpenTherm communication started");
     return ESP_OK;
 }
@@ -173,36 +184,24 @@ void ot_reset(ot_handle_t* handle) {
 
 bool ot_process(ot_handle_t* handle, ot_message_t* request, ot_message_t* response) {
     if (!handle) return false;
-    
+
     bool transaction_complete = false;
-    
-    // Process both interfaces
+
+    // Process both interfaces - this triggers callbacks when messages complete
     handle->thermostat_if->process();
     handle->boiler_if->process();
-    
+
     xSemaphoreTake(handle->mutex, portMAX_DELAY);
-    
-    // Check if thermostat sent a request
-    if (handle->thermostat_if->isReady() && !handle->request_pending) {
-        // In slave mode, check if we received a request
-        OpenThermStatus status = handle->thermostat_if->status;
-        if (status == OpenThermStatus::RESPONSE_READY) {
-            unsigned long req = handle->thermostat_if->getLastResponse();
-            OpenThermResponseStatus req_status = handle->thermostat_if->getLastResponseStatus();
-            
-            if (req_status == OpenThermResponseStatus::SUCCESS) {
-                handle->pending_request = req;
-                handle->request_pending = true;
-                handle->rx_count++;
-                
-                ESP_LOGD(TAG, "Received request from thermostat: 0x%08lX", req);
-                
-                // Call message callback
-                if (handle->message_callback) {
-                    ot_message_t msg = {req};
-                    handle->message_callback(handle, &msg, OT_ROLE_MASTER, handle->message_callback_data);
-                }
-            }
+
+    // Check if thermostat sent a request (set by thermostat_request_callback)
+    // Only call message callback once per request
+    if (handle->request_pending && !handle->request_notified) {
+        handle->request_notified = true;
+        ESP_LOGD(TAG, "Received request from thermostat: 0x%08lX", handle->pending_request);
+        // Call message callback for the received request
+        if (handle->message_callback) {
+            ot_message_t msg = {handle->pending_request};
+            handle->message_callback(handle, &msg, OT_ROLE_MASTER, handle->message_callback_data);
         }
     }
     

@@ -19,8 +19,8 @@ extern "C" {
 
 // GPIO Configuration
 // Pins connected to thermostat (master side)
-#define OT_MASTER_IN_PIN    GPIO_NUM_25  
-#define OT_MASTER_OUT_PIN   GPIO_NUM_26  
+#define OT_MASTER_IN_PIN    GPIO_NUM_25
+#define OT_MASTER_OUT_PIN   GPIO_NUM_26
 
 // Pins connected to boiler (slave side)
 #define OT_SLAVE_IN_PIN     GPIO_NUM_13

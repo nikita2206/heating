@@ -16,6 +16,21 @@
     "array": "c",
     "string": "c",
     "string_view": "c",
-    "span": "c"
+    "span": "c",
+    "*.tcc": "cpp",
+    "chrono": "cpp",
+    "deque": "cpp",
+    "list": "cpp",
+    "unordered_map": "cpp",
+    "unordered_set": "cpp",
+    "vector": "cpp",
+    "memory": "cpp",
+    "random": "cpp",
+    "format": "cpp",
+    "initializer_list": "cpp",
+    "mutex": "cpp",
+    "text_encoding": "cpp",
+    "thread": "cpp",
+    "regex": "cpp"
   }
 }
