@@ -5,7 +5,7 @@
 #include "websocket_server.h"
 #include "boiler_manager.hpp"
 #include "mqtt_bridge.hpp"
-#include "opentherm.hpp"
+#include "OpenTherm.h"
 
 extern "C" {
 #include "web_ui.h"

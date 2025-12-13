@@ -4,6 +4,7 @@
 
 #include "boiler_manager.hpp"
 #include "mqtt_bridge.hpp"
+#include "OpenTherm.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
@@ -95,23 +96,15 @@ public:
     esp_err_t start() {
         // Create OpenTherm instances with configured pins
         thermostat_ = std::make_unique<OpenTherm>(
-            config_.thermostatInPin, config_.thermostatOutPin, true);
+            config_.thermostatInPin, config_.thermostatOutPin, true,
+            config_.thermostatInvertOutput, config_.thermostatInvertInput);
         boiler_ = std::make_unique<OpenTherm>(
-            config_.boilerInPin, config_.boilerOutPin, false);
+            config_.boilerInPin, config_.boilerOutPin, false,
+            config_.boilerInvertOutput, config_.boilerInvertInput);
 
         // Initialize OpenTherm instances
-        esp_err_t err = thermostat_->begin();
-        if (err != ESP_OK) {
-            ESP_LOGE(TAG, "Failed to initialize thermostat OpenTherm: %s", esp_err_to_name(err));
-            return err;
-        }
-
-        err = boiler_->begin();
-        if (err != ESP_OK) {
-            ESP_LOGE(TAG, "Failed to initialize boiler OpenTherm: %s", esp_err_to_name(err));
-            thermostat_->end();
-            return err;
-        }
+        thermostat_->begin();
+        boiler_->begin();
 
         running_ = true;
 
@@ -130,6 +123,9 @@ public:
         }
 
         ESP_LOGI(TAG, "Main loop started in %s mode", toString(config_.mode));
+        ESP_LOGI(TAG, "Thermostat: invertOut=%d invertIn=%d, Boiler: invertOut=%d invertIn=%d",
+                 config_.thermostatInvertOutput, config_.thermostatInvertInput,
+                 config_.boilerInvertOutput, config_.boilerInvertInput);
         return ESP_OK;
     }
 
@@ -175,23 +171,12 @@ public:
         Frame request = Frame::buildRequest(MessageType::WriteData, dataId, dataValue);
 
         // Send request to boiler
-        if (!boiler_->sendRequest(request)) {
+        auto boilerResponse = boiler_->sendRequest(request.raw());
+        if (boilerResponse == 0) {
             return ESP_ERR_INVALID_STATE; // Boiler busy
         }
-
-        // Wait for response by polling
-        auto startTime = esp_timer_get_time();
-        while ((esp_timer_get_time() - startTime) < (timeout.count() * 1000)) {
-            auto boilerResponse = boiler_->popResponse();
-            if (boilerResponse) {
-                response = boilerResponse;
-                return boilerResponse->isValidParity() ? ESP_OK : ESP_ERR_INVALID_CRC;
-            }
-
-            vTaskDelay(pdMS_TO_TICKS(1));
-        }
-
-        return ESP_ERR_TIMEOUT;
+        response = Frame(boilerResponse);
+        return ESP_OK;
     }
 
     void setMessageCallback(MessageCallback callback) {
@@ -354,28 +339,96 @@ private:
 
     void taskFunction() {
         ESP_LOGI(TAG, "Main loop task started");
+        uint32_t loopCount = 0;
+        uint32_t validFrames = 0;
+        uint32_t invalidFrames = 0;
 
         while (running_.load()) {
-            // Check for requests from thermostat and forward to boiler
-            auto thermostatRequest = thermostat_->popRequest();
-            if (thermostatRequest) {
-                ESP_LOGD(TAG, "Forwarding thermostat request 0x%08lX to boiler",
-                         thermostatRequest->raw());
-                logMessage("REQUEST", MessageSource::ThermostatBoiler, *thermostatRequest);
-                if (!boiler_->sendRequest(*thermostatRequest)) {
-                    ESP_LOGW(TAG, "Failed to send request to boiler");
+            thermostat_->process([this, &loopCount, &validFrames, &invalidFrames](unsigned long request, OpenThermResponseStatus status) {
+                if (status == OpenThermResponseStatus::TIMEOUT) {
+                    // Don't log timeouts - they're normal when no data
+                    return;
                 }
-            }
 
-            // Check for responses from boiler and forward to thermostat
-            auto boilerResponse = boiler_->popResponse();
-            if (boilerResponse) {
-                ESP_LOGD(TAG, "Forwarding boiler response 0x%08lX to thermostat",
-                         boilerResponse->raw());
-                logMessage("RESPONSE", MessageSource::ThermostatBoiler, *boilerResponse);
-                if (!thermostat_->sendResponse(*boilerResponse)) {
-                    ESP_LOGW(TAG, "Failed to send response to thermostat");
+                Frame reqFrame(request);
+                uint8_t dataId = reqFrame.dataId();
+                auto msgType = reqFrame.messageType();
+
+                // Log ALL frames including invalid - to debug ID=0 issue
+                if (status == OpenThermResponseStatus::INVALID) {
+                    invalidFrames++;
+                    bool parityOk = !OpenTherm::parity(request);
+                    ESP_LOGW(TAG, "INVALID #%lu: ID=%d type=%s raw=0x%08lX parity=%s",
+                             (unsigned long)invalidFrames, dataId, toString(msgType), request, parityOk ? "OK" : "BAD");
+                    if (dataId == 0) {
+                        ESP_LOGW(TAG, "ID=0 detected but invalid! HB=0x%02X LB=0x%02X",
+                                 reqFrame.highByte(), reqFrame.lowByte());
+                    }
+                    return;
                 }
+
+                validFrames++;
+
+                if (status != OpenThermResponseStatus::SUCCESS) {
+                    ESP_LOGW(TAG, "Thermostat frame %s: ID=%d type=%s raw=0x%08lX",
+                             OpenTherm::statusToString(status), dataId,
+                             toString(msgType), request);
+                    return;
+                }
+
+                int64_t t0 = esp_timer_get_time();
+
+                // Log Status frame (ID=0) details
+                if (dataId == 0) {
+                    uint8_t masterFlags = reqFrame.highByte();
+                    ESP_LOGI(TAG, "Status REQ: CH=%d DHW=%d Cool=%d OTC=%d CH2=%d",
+                             (masterFlags >> 0) & 1, (masterFlags >> 1) & 1,
+                             (masterFlags >> 2) & 1, (masterFlags >> 3) & 1,
+                             (masterFlags >> 4) & 1);
+                } else {
+                    ESP_LOGI(TAG, "Forwarding ID=%d request 0x%08lX to boiler", dataId, request);
+                }
+                logMessage("REQUEST", MessageSource::ThermostatBoiler, reqFrame);
+
+                auto boilerResponse = boiler_->sendRequest(request);
+                int64_t t1 = esp_timer_get_time();
+
+                if (!boilerResponse) {
+                    ESP_LOGW(TAG, "Failed to send request to boiler (took %lld ms)", (t1 - t0) / 1000);
+                    return;
+                }
+
+                Frame respFrame(boilerResponse);
+
+                // Log Status frame (ID=0) response details
+                if (dataId == 0) {
+                    uint8_t slaveFlags = respFrame.lowByte();
+                    ESP_LOGI(TAG, "Status RESP: Fault=%d CH=%d DHW=%d Flame=%d Cool=%d CH2=%d Diag=%d (took %lld ms)",
+                             (slaveFlags >> 0) & 1, (slaveFlags >> 1) & 1,
+                             (slaveFlags >> 2) & 1, (slaveFlags >> 3) & 1,
+                             (slaveFlags >> 4) & 1, (slaveFlags >> 5) & 1,
+                             (slaveFlags >> 6) & 1, (t1 - t0) / 1000);
+                } else {
+                    ESP_LOGI(TAG, "Boiler response: 0x%08lX (took %lld ms)", boilerResponse, (t1 - t0) / 1000);
+                }
+
+                logMessage("RESPONSE", MessageSource::ThermostatBoiler, respFrame);
+                bool sent = thermostat_->sendResponse(boilerResponse);
+                int64_t t2 = esp_timer_get_time();
+                ESP_LOGI(TAG, "Response sent to thermostat: %s (took %lld ms total)", sent ? "OK" : "FAILED", (t2 - t0) / 1000);
+            });
+
+            // Periodic status logging
+            loopCount++;
+            if (loopCount % 3000 == 0) {
+                static uint32_t lastInterrupts = 0;
+                uint32_t curInterrupts = thermostat_->interruptCount;
+                ESP_LOGI(TAG, "Heartbeat: valid=%lu invalid=%lu interrupts=+%lu gpio=%d",
+                         (unsigned long)validFrames,
+                         (unsigned long)invalidFrames,
+                         (unsigned long)(curInterrupts - lastInterrupts),
+                         gpio_get_level(config_.thermostatInPin));
+                lastInterrupts = curInterrupts;
             }
 
             // Small delay to prevent busy looping

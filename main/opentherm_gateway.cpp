@@ -26,7 +26,7 @@
 #include "nvs_flash.h"
 
 #include "opentherm_gateway.h"
-#include "opentherm.hpp"
+#include "OpenTherm.h"
 #include "boiler_manager.hpp"
 #include "mqtt_bridge.hpp"
 
@@ -241,7 +241,7 @@ static void start_gateway() {
     ESP_LOGI(TAG, "Main loop started");
 
     // Start heartbeat task
-    xTaskCreate(heartbeat_task, "heartbeat", 2048, nullptr, 3, nullptr);
+    //xTaskCreate(heartbeat_task, "heartbeat", 2048, nullptr, 3, nullptr);
 
     ESP_LOGI(TAG, "OpenTherm gateway running");
     ESP_LOGI(TAG, "  Thermostat side: RX=GPIO%d, TX=GPIO%d", OT_MASTER_IN_PIN, OT_MASTER_OUT_PIN);
