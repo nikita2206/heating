@@ -1,7 +1,7 @@
-# Boiler Manager - main loop and diagnostics
+# Boiler Manager - main loop and diagnostics (C++)
 idf_component_register(
-    SRCS "boiler_manager.c"
-    INCLUDE_DIRS "."
+    SRCS "boiler_manager.cpp"
+    INCLUDE_DIRS "include"
     REQUIRES opentherm mqtt_bridge freertos
     PRIV_REQUIRES esp_timer
 )

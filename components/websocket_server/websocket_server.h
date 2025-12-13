@@ -1,5 +1,5 @@
 /*
- * WebSocket Server for OpenTherm Message Logging
+ * WebSocket Server for OpenTherm Message Logging (C++)
  */
 
 #ifndef WEBSOCKET_SERVER_H
@@ -9,8 +9,12 @@
 #include "esp_http_server.h"
 #include <stdint.h>
 
-// Forward declaration to avoid depending on main component
-typedef struct boiler_manager boiler_manager_t;
+#ifdef __cplusplus
+namespace ot {
+    class BoilerManager;
+    class MqttBridge;
+}
+#endif
 
 #ifdef __cplusplus
 extern "C" {
@@ -23,8 +27,13 @@ typedef struct {
     bool client_connected;
 } websocket_server_t;
 
-// Initialize and start WebSocket server
-esp_err_t websocket_server_start(websocket_server_t *ws_server, boiler_manager_t *boiler_mgr);
+#ifdef __cplusplus
+// Initialize and start WebSocket server (C++ version)
+esp_err_t websocket_server_start(websocket_server_t *ws_server, ot::BoilerManager *boiler_mgr);
+
+// Set MQTT bridge instance
+void websocket_server_set_mqtt(ot::MqttBridge *mqtt);
+#endif
 
 // Stop WebSocket server
 void websocket_server_stop(websocket_server_t *ws_server);
@@ -33,7 +42,6 @@ void websocket_server_stop(websocket_server_t *ws_server);
 esp_err_t websocket_server_send_text(websocket_server_t *ws_server, const char *text);
 
 // Send JSON formatted OpenTherm message
-// source: "THERMOSTAT_BOILER", "GATEWAY_BOILER", or "THERMOSTAT_GATEWAY"
 esp_err_t websocket_server_send_opentherm_message(websocket_server_t *ws_server,
                                                    const char *direction,
                                                    uint32_t message,
@@ -50,4 +58,3 @@ httpd_handle_t websocket_server_get_handle(websocket_server_t *ws_server);
 #endif
 
 #endif // WEBSOCKET_SERVER_H
-
