@@ -95,9 +95,9 @@ public:
     esp_err_t start() {
         // Create OpenTherm instances with configured pins
         thermostat_ = std::make_unique<OpenTherm>(
-            config_.thermostatInPin, config_.thermostatOutPin, false);
+            config_.thermostatInPin, config_.thermostatOutPin, true);
         boiler_ = std::make_unique<OpenTherm>(
-            config_.boilerInPin, config_.boilerOutPin, true);
+            config_.boilerInPin, config_.boilerOutPin, false);
 
         // Initialize OpenTherm instances
         esp_err_t err = thermostat_->begin();
