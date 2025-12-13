@@ -9,7 +9,7 @@
 #include "esp_http_server.h"
 #include "esp_timer.h"
 #include "boiler_manager.h"
-#include "opentherm_api.h"
+#include "ot_queues.h"
 #include "mqtt_bridge.h"
 #include <string.h>
 #include <stdio.h>
