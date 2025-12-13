@@ -7,9 +7,9 @@
  * OpenTherm Protocol Overview:
  * - Manchester encoding at 1 kbit/s (1ms per bit, 500µs per half-bit)
  * - Frame structure: start bit + 32 data bits + stop bit = 34 bits total
- * - Manchester encoding: bit 1 = HIGH-LOW transition, bit 0 = LOW-HIGH transition
+ * - Manchester encoding: bit 1 = LOW-HIGH transition, bit 0 = HIGH-LOW transition
  * - Idle state: HIGH (no transmission)
- * - Start/stop bits are always '1' (HIGH-LOW)
+ * - Start/stop bits are always '1' (LOW-HIGH)
  *
  * RMT Configuration:
  * - Resolution: 1µs (1 MHz tick rate)
@@ -48,22 +48,22 @@ typedef struct {
  * Encode a single Manchester bit into an RMT symbol
  *
  * Manchester encoding for OpenTherm:
- * - Bit 1: First half HIGH (500µs), second half LOW (500µs) → HIGH-to-LOW transition at mid-bit
- * - Bit 0: First half LOW (500µs), second half HIGH (500µs) → LOW-to-HIGH transition at mid-bit
+ * - Bit 1: First half LOW (500µs), second half HIGH (500µs) → LOW-to-HIGH transition at mid-bit
+ * - Bit 0: First half HIGH (500µs), second half LOW (500µs) → HIGH-to-LOW transition at mid-bit
  */
 static inline void encode_manchester_bit(rmt_symbol_word_t *symbol, bool bit_value)
 {
     if (bit_value) {
-        // Bit 1: HIGH then LOW
-        symbol->level0 = 1;
-        symbol->duration0 = OT_HALF_BIT_US;
-        symbol->level1 = 0;
-        symbol->duration1 = OT_HALF_BIT_US;
-    } else {
-        // Bit 0: LOW then HIGH
+        // Bit 1: LOW then HIGH
         symbol->level0 = 0;
         symbol->duration0 = OT_HALF_BIT_US;
         symbol->level1 = 1;
+        symbol->duration1 = OT_HALF_BIT_US;
+    } else {
+        // Bit 0: HIGH then LOW
+        symbol->level0 = 1;
+        symbol->duration0 = OT_HALF_BIT_US;
+        symbol->level1 = 0;
         symbol->duration1 = OT_HALF_BIT_US;
     }
 }

@@ -180,8 +180,8 @@ static esp_err_t thermostat_receive_frame(ot_thermostat_t *ctx, uint32_t *frame,
         uint8_t second_half = half_bits[i + 1];
 
         bool bit_value;
-        if (first_half == 1 && second_half == 0) bit_value = true;
-        else if (first_half == 0 && second_half == 1) bit_value = false;
+        if (first_half == 0 && second_half == 1) bit_value = true;
+        else if (first_half == 1 && second_half == 0) bit_value = false;
         else continue;
 
         if (!found_start) {
