@@ -9,10 +9,17 @@
 #include <memory>
 #include <functional>
 #include <optional>
+#include <queue>
 #include "driver/gpio.h"
 #include "esp_err.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/queue.h"
+#include "freertos/task.h"
 
 namespace ot {
+
+#define LIKELY(x)   __builtin_expect(!!(x), 1)
+#define UNLIKELY(x) __builtin_expect(!!(x), 0)
 
 // Response status from OpenTherm communication
 enum class ResponseStatus {
@@ -104,40 +111,31 @@ public:
     [[nodiscard]] constexpr bool operator!=(const Frame& other) const { return raw_ != other.raw_; }
 
 private:
+    // Internal parity check
+    [[nodiscard]] static bool isValidParityInternal(uint32_t frame);
+
+private:
     uint32_t raw_;
 };
 
-// Callback type for async response handling
-using ResponseCallback = std::function<void(Frame response, ResponseStatus status)>;
-
 /**
- * OpenTherm port configuration
- */
-struct PortConfig {
-    gpio_num_t inPin;
-    gpio_num_t outPin;
-    bool isSlave;  // true = boiler mode, false = thermostat/master mode
-};
-
-/**
- * RAII wrapper for OpenTherm communication port
+ * OpenTherm communication port
  *
  * Manages GPIO configuration, ISR handlers, and Manchester encoding/decoding.
- * The underlying implementation uses the ISR-based C library.
+ * ISR-based implementation with Manchester encoding.
  */
-class Port {
+class OpenTherm {
 public:
-    explicit Port(const PortConfig& config);
-    explicit Port(gpio_num_t inPin, gpio_num_t outPin, bool isSlave);
-    ~Port();
+    explicit OpenTherm(gpio_num_t inPin, gpio_num_t outPin, bool isSlave);
+    ~OpenTherm();
 
     // Non-copyable
-    Port(const Port&) = delete;
-    Port& operator=(const Port&) = delete;
+    OpenTherm(const OpenTherm&) = delete;
+    OpenTherm& operator=(const OpenTherm&) = delete;
 
-    // Movable
-    Port(Port&& other) noexcept;
-    Port& operator=(Port&& other) noexcept;
+    // Non-movable (due to ISR registration)
+    OpenTherm(OpenTherm&& other) = delete;
+    OpenTherm& operator=(OpenTherm&& other) = delete;
 
     // Lifecycle
     [[nodiscard]] esp_err_t begin();
@@ -145,28 +143,63 @@ public:
 
     // State queries
     [[nodiscard]] bool isReady() const;
-    [[nodiscard]] bool isInitialized() const { return impl_ != nullptr; }
+    [[nodiscard]] bool isInitialized() const { return initialized_; }
 
-    // Synchronous communication (blocking, ~1 second timeout)
-    [[nodiscard]] Frame sendRequest(Frame request);
-
-    // Asynchronous communication
-    [[nodiscard]] bool sendRequestAsync(Frame request);
-    void setResponseCallback(ResponseCallback callback);
-
-    // Response (slave mode)
+    // Send frames (non-blocking, queued for sending)
+    [[nodiscard]] bool sendRequest(Frame request);
     [[nodiscard]] bool sendResponse(Frame response);
 
-    // Main loop processing - must call regularly
-    void process();
+    // Receive frames (non-blocking, from queue)
+    [[nodiscard]] std::optional<Frame> popRequest();
+    [[nodiscard]] std::optional<Frame> popResponse();
 
-    // Last response access
-    [[nodiscard]] Frame lastResponse() const;
-    [[nodiscard]] ResponseStatus lastResponseStatus() const;
+    // ISR handler (public for static ISR to access)
+    void gpioIsrHandler();
 
 private:
-    class Impl;
-    std::unique_ptr<Impl> impl_;
+    // Thread
+    TaskHandle_t thread_handle_;
+
+    // Pending frames (single slot each - override on new)
+    std::optional<Frame> pending_outgoing_;    // Next frame to send
+    std::optional<Frame> received_request_;    // Last received request (slave mode)
+    std::optional<Frame> received_response_;   // Last received response (master mode)
+
+    // Sending state
+    volatile bool currently_sending_;          // True when actively transmitting
+    bool bus_stabilized_;                     // True after initial 1-second stabilization
+
+    // GPIO and configuration
+    gpio_num_t in_pin_;
+    gpio_num_t out_pin_;
+    bool is_slave_;
+    bool initialized_;
+
+    // ISR state machine for reception
+    enum class RxState {
+        Idle,
+        StartBit,
+        Receiving,
+        Complete
+    };
+    volatile RxState rx_state_;
+    volatile int64_t rx_timestamp_us_;
+    volatile uint8_t rx_bit_index_;
+    volatile uint32_t rx_data_;
+
+    // Thread function
+    static void communicationThread(void* arg);
+    void runCommunicationLoop();
+
+    // Communication helpers
+    void sendFrame(Frame frame);
+
+    // GPIO helpers
+    void sendBit(bool high);
+    int readState() const;
+
+    // Static ISR handler
+    static void staticGpioIsrHandler(void* arg);
 };
 
 // Helper functions

@@ -31,6 +31,10 @@
     "mutex": "cpp",
     "text_encoding": "cpp",
     "thread": "cpp",
-    "regex": "cpp"
+    "regex": "cpp",
+    "atomic": "cpp",
+    "optional": "cpp",
+    "bitset": "cpp",
+    "cstdlib": "cpp"
   }
 }

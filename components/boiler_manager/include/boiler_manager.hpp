@@ -14,7 +14,6 @@
 #include <memory>
 #include <string_view>
 #include "opentherm.hpp"
-#include "ot_queues.hpp"
 #include "esp_err.h"
 #include "esp_timer.h"
 
@@ -135,7 +134,7 @@ public:
     BoilerManager& operator=(const BoilerManager&) = delete;
 
     // Start the main loop task
-    [[nodiscard]] esp_err_t start(Queues* queues);
+    [[nodiscard]] esp_err_t start();
     void stop();
     [[nodiscard]] bool isRunning() const;
 

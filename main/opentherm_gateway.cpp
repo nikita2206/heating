@@ -27,9 +27,6 @@
 
 #include "opentherm_gateway.h"
 #include "opentherm.hpp"
-#include "ot_queues.hpp"
-#include "ot_thermostat.hpp"
-#include "ot_boiler.hpp"
 #include "boiler_manager.hpp"
 #include "mqtt_bridge.hpp"
 
@@ -54,9 +51,6 @@ static int s_retry_num = 0;
 static websocket_server_t ws_server;
 
 // C++ smart pointers for RAII components
-static std::unique_ptr<ot::Queues> s_queues;
-static std::unique_ptr<ot::ThermostatTask> s_thermostat;
-static std::unique_ptr<ot::BoilerTask> s_boiler;
 static std::unique_ptr<ot::BoilerManager> s_manager;
 static std::unique_ptr<ot::MqttBridge> s_mqtt;
 
@@ -167,45 +161,38 @@ static void heartbeat_task(void* arg) {
     while (true) {
         vTaskDelay(pdMS_TO_TICKS(5000));
 
-        if (s_thermostat && s_boiler) {
-            auto therm_stats = s_thermostat->stats();
-            auto boiler_stats = s_boiler->stats();
 
-            char status_msg[256];
-            snprintf(status_msg, sizeof(status_msg),
-                     "Gateway status: OK | Uptime: %llu s | Therm RX: %lu TX: %lu | Boiler RX: %lu TX: %lu",
-                     static_cast<unsigned long long>(esp_timer_get_time() / 1000000),
-                     static_cast<unsigned long>(therm_stats.rxCount),
-                     static_cast<unsigned long>(therm_stats.txCount),
-                     static_cast<unsigned long>(boiler_stats.rxCount),
-                     static_cast<unsigned long>(boiler_stats.txCount));
+        // if (s_thermostat && s_boiler) {
+        //     auto therm_stats = s_thermostat->stats();
+        //     auto boiler_stats = s_boiler->stats();
 
-            websocket_server_send_text(&ws_server, status_msg);
+        //     char status_msg[256];
+        //     snprintf(status_msg, sizeof(status_msg),
+        //              "Gateway status: OK | Uptime: %llu s | Therm RX: %lu TX: %lu | Boiler RX: %lu TX: %lu",
+        //              static_cast<unsigned long long>(esp_timer_get_time() / 1000000),
+        //              static_cast<unsigned long>(therm_stats.rxCount),
+        //              static_cast<unsigned long>(therm_stats.txCount),
+        //              static_cast<unsigned long>(boiler_stats.rxCount),
+        //              static_cast<unsigned long>(boiler_stats.txCount));
 
-            ESP_LOGD(TAG, "Stats: Therm(rx=%lu,tx=%lu,err=%lu,to=%lu) Boiler(rx=%lu,tx=%lu,err=%lu,to=%lu)",
-                     static_cast<unsigned long>(therm_stats.rxCount),
-                     static_cast<unsigned long>(therm_stats.txCount),
-                     static_cast<unsigned long>(therm_stats.errorCount),
-                     static_cast<unsigned long>(therm_stats.timeoutCount),
-                     static_cast<unsigned long>(boiler_stats.rxCount),
-                     static_cast<unsigned long>(boiler_stats.txCount),
-                     static_cast<unsigned long>(boiler_stats.errorCount),
-                     static_cast<unsigned long>(boiler_stats.timeoutCount));
-        }
+        //     websocket_server_send_text(&ws_server, status_msg);
+
+        //     ESP_LOGD(TAG, "Stats: Therm(rx=%lu,tx=%lu,err=%lu,to=%lu) Boiler(rx=%lu,tx=%lu,err=%lu,to=%lu)",
+        //              static_cast<unsigned long>(therm_stats.rxCount),
+        //              static_cast<unsigned long>(therm_stats.txCount),
+        //              static_cast<unsigned long>(therm_stats.errorCount),
+        //              static_cast<unsigned long>(therm_stats.timeoutCount),
+        //              static_cast<unsigned long>(boiler_stats.rxCount),
+        //              static_cast<unsigned long>(boiler_stats.txCount),
+        //              static_cast<unsigned long>(boiler_stats.errorCount),
+        //              static_cast<unsigned long>(boiler_stats.timeoutCount));
+        // }
     }
 }
 
 // Initialize and start the gateway
 static void start_gateway() {
     ESP_LOGI(TAG, "Starting OpenTherm gateway (C++ implementation)");
-
-    // Create shared queues
-    s_queues = std::make_unique<ot::Queues>();
-    if (!s_queues->isValid()) {
-        ESP_LOGE(TAG, "Failed to create queues");
-        return;
-    }
-    ESP_LOGI(TAG, "Queues created");
 
     // Start MQTT bridge
     ot::MqttConfig mqtt_cfg;
@@ -242,40 +229,8 @@ static void start_gateway() {
     }
     ESP_LOGI(TAG, "WebSocket server started");
 
-    // Start thermostat task
-    ot::ThermostatConfig therm_cfg;
-    therm_cfg.rxPin = OT_MASTER_IN_PIN;
-    therm_cfg.txPin = OT_MASTER_OUT_PIN;
-    therm_cfg.queues = s_queues.get();
-    therm_cfg.taskStackSize = 4096;
-    therm_cfg.taskPriority = 6;
-
-    s_thermostat = std::make_unique<ot::ThermostatTask>(therm_cfg);
-    if (!s_thermostat->isRunning()) {
-        ESP_LOGE(TAG, "Failed to start thermostat task");
-        return;
-    }
-    ESP_LOGI(TAG, "Thermostat task started (RX=GPIO%d, TX=GPIO%d)",
-             OT_MASTER_IN_PIN, OT_MASTER_OUT_PIN);
-
-    // Start boiler task
-    ot::BoilerConfig boiler_cfg;
-    boiler_cfg.rxPin = OT_SLAVE_IN_PIN;
-    boiler_cfg.txPin = OT_SLAVE_OUT_PIN;
-    boiler_cfg.queues = s_queues.get();
-    boiler_cfg.taskStackSize = 4096;
-    boiler_cfg.taskPriority = 6;
-
-    s_boiler = std::make_unique<ot::BoilerTask>(boiler_cfg);
-    if (!s_boiler->isRunning()) {
-        ESP_LOGE(TAG, "Failed to start boiler task");
-        return;
-    }
-    ESP_LOGI(TAG, "Boiler task started (RX=GPIO%d, TX=GPIO%d)",
-             OT_SLAVE_IN_PIN, OT_SLAVE_OUT_PIN);
-
     // Start boiler manager main loop
-    if (s_manager->start(s_queues.get()) != ESP_OK) {
+    if (s_manager->start() != ESP_OK) {
         ESP_LOGE(TAG, "Failed to start boiler manager main loop");
         return;
     }

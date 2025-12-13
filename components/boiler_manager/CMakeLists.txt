@@ -2,6 +2,6 @@
 idf_component_register(
     SRCS "boiler_manager.cpp"
     INCLUDE_DIRS "include"
-    REQUIRES opentherm mqtt_bridge freertos
+    REQUIRES opentherm_library mqtt_bridge freertos
     PRIV_REQUIRES esp_timer
 )
