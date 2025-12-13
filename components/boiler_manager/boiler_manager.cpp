@@ -93,17 +93,23 @@ public:
     }
 
     esp_err_t start() {
+        // Create OpenTherm instances with configured pins
+        thermostat_ = std::make_unique<OpenTherm>(
+            config_.thermostatInPin, config_.thermostatOutPin, false);
+        boiler_ = std::make_unique<OpenTherm>(
+            config_.boilerInPin, config_.boilerOutPin, true);
+
         // Initialize OpenTherm instances
-        esp_err_t err = thermostat_.begin();
+        esp_err_t err = thermostat_->begin();
         if (err != ESP_OK) {
             ESP_LOGE(TAG, "Failed to initialize thermostat OpenTherm: %s", esp_err_to_name(err));
             return err;
         }
 
-        err = boiler_.begin();
+        err = boiler_->begin();
         if (err != ESP_OK) {
             ESP_LOGE(TAG, "Failed to initialize boiler OpenTherm: %s", esp_err_to_name(err));
-            thermostat_.end();
+            thermostat_->end();
             return err;
         }
 
@@ -129,8 +135,8 @@ public:
 
     void stop() {
         running_ = false;
-        thermostat_.end();
-        boiler_.end();
+        if (thermostat_) thermostat_->end();
+        if (boiler_) boiler_->end();
         if (taskHandle_) {
             vTaskDelay(pdMS_TO_TICKS(150));
             taskHandle_ = nullptr;
@@ -169,14 +175,14 @@ public:
         Frame request = Frame::buildRequest(MessageType::WriteData, dataId, dataValue);
 
         // Send request to boiler
-        if (!boiler_.sendRequest(request)) {
+        if (!boiler_->sendRequest(request)) {
             return ESP_ERR_INVALID_STATE; // Boiler busy
         }
 
         // Wait for response by polling
         auto startTime = esp_timer_get_time();
         while ((esp_timer_get_time() - startTime) < (timeout.count() * 1000)) {
-            auto boilerResponse = boiler_.popResponse();
+            auto boilerResponse = boiler_->popResponse();
             if (boilerResponse) {
                 response = boilerResponse;
                 return boilerResponse->isValidParity() ? ESP_OK : ESP_ERR_INVALID_CRC;
@@ -351,23 +357,23 @@ private:
 
         while (running_.load()) {
             // Check for requests from thermostat and forward to boiler
-            auto thermostatRequest = thermostat_.popRequest();
+            auto thermostatRequest = thermostat_->popRequest();
             if (thermostatRequest) {
                 ESP_LOGD(TAG, "Forwarding thermostat request 0x%08lX to boiler",
                          thermostatRequest->raw());
                 logMessage("REQUEST", MessageSource::ThermostatBoiler, *thermostatRequest);
-                if (!boiler_.sendRequest(*thermostatRequest)) {
+                if (!boiler_->sendRequest(*thermostatRequest)) {
                     ESP_LOGW(TAG, "Failed to send request to boiler");
                 }
             }
 
             // Check for responses from boiler and forward to thermostat
-            auto boilerResponse = boiler_.popResponse();
+            auto boilerResponse = boiler_->popResponse();
             if (boilerResponse) {
                 ESP_LOGD(TAG, "Forwarding boiler response 0x%08lX to thermostat",
                          boilerResponse->raw());
                 logMessage("RESPONSE", MessageSource::ThermostatBoiler, *boilerResponse);
-                if (!thermostat_.sendResponse(*boilerResponse)) {
+                if (!thermostat_->sendResponse(*boilerResponse)) {
                     ESP_LOGW(TAG, "Failed to send response to thermostat");
                 }
             }
@@ -543,8 +549,9 @@ private:
     std::atomic<bool> running_{false};
 
     // OpenTherm instances for thermostat (master) and boiler (slave)
-    OpenTherm thermostat_{GPIO_NUM_16, GPIO_NUM_17, false};  // Master mode
-    OpenTherm boiler_{GPIO_NUM_18, GPIO_NUM_19, true};       // Slave mode
+    // Will be constructed in start() method with proper pins
+    std::unique_ptr<OpenTherm> thermostat_;
+    std::unique_ptr<OpenTherm> boiler_;
 
     // Diagnostics
     Diagnostics diagnostics_;

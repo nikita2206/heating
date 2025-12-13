@@ -113,6 +113,12 @@ struct ManagerConfig {
     uint32_t interceptRate = 10;  // Intercept every Nth ID=0 frame
     uint32_t taskStackSize = 4096;
     UBaseType_t taskPriority = 5;
+
+    // OpenTherm pin configuration
+    gpio_num_t thermostatInPin = GPIO_NUM_16;
+    gpio_num_t thermostatOutPin = GPIO_NUM_17;
+    gpio_num_t boilerInPin = GPIO_NUM_18;
+    gpio_num_t boilerOutPin = GPIO_NUM_19;
 };
 
 /**

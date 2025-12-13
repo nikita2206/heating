@@ -209,6 +209,10 @@ static void start_gateway() {
     mgr_cfg.interceptRate = 4;
     mgr_cfg.taskStackSize = 4096;
     mgr_cfg.taskPriority = 5;
+    mgr_cfg.thermostatInPin = OT_MASTER_IN_PIN;
+    mgr_cfg.thermostatOutPin = OT_MASTER_OUT_PIN;
+    mgr_cfg.boilerInPin = OT_SLAVE_IN_PIN;
+    mgr_cfg.boilerOutPin = OT_SLAVE_OUT_PIN;
 
     s_manager = std::make_unique<ot::BoilerManager>(mgr_cfg);
 
