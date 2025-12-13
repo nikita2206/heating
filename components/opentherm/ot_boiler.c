@@ -169,40 +169,12 @@ static esp_err_t boiler_receive_frame(ot_boiler_t *ctx, uint32_t *frame, uint32_
         }
     }
 
-    // Decode Manchester
-    uint32_t decoded = 0;
-    int bit_count = 0;
-    bool found_start = false;
-
-    for (int i = 0; i < hb_count - 1 && bit_count < 32; i += 2) {
-        uint8_t first_half = half_bits[i];
-        uint8_t second_half = half_bits[i + 1];
-
-        bool bit_value;
-        if (first_half == 0 && second_half == 1) bit_value = true;
-        else if (first_half == 1 && second_half == 0) bit_value = false;
-        else continue;
-
-        if (!found_start) {
-            if (bit_value) found_start = true;
-        } else {
-            decoded = (decoded << 1) | (bit_value ? 1 : 0);
-            bit_count++;
-        }
-    }
-
-    if (bit_count != 32) {
+    // Decode Manchester using shared decoder (handles phase alignment and validation)
+    uint32_t decoded;
+    esp_err_t decode_ret = opentherm_decode_frame(half_bits, hb_count, &decoded);
+    if (decode_ret != ESP_OK) {
         ctx->stats.error_count++;
-        return ESP_ERR_INVALID_RESPONSE;
-    }
-
-    // Check parity
-    uint32_t parity_check = decoded;
-    int ones = 0;
-    while (parity_check) { parity_check &= (parity_check - 1); ones++; }
-    if (ones % 2 != 0) {
-        ctx->stats.error_count++;
-        return ESP_ERR_INVALID_CRC;
+        return decode_ret;
     }
 
     *frame = decoded;

@@ -48,6 +48,36 @@ typedef struct {
  */
 esp_err_t opentherm_encoder_create(rmt_encoder_handle_t *ret_encoder);
 
+// ============================================================================
+// Manchester Decoder
+// ============================================================================
+
+/**
+ * Result of Manchester decoding attempt
+ */
+typedef struct {
+    uint32_t frame;        // 32-bit decoded data
+    int errors;            // Invalid Manchester transitions encountered
+    bool start_bit_valid;  // Was start bit = 1?
+    bool stop_bit_valid;   // Was stop bit = 1? (34th bit)
+    int bits_decoded;      // Total bits successfully decoded (including start)
+} opentherm_decode_result_t;
+
+/**
+ * Decode Manchester-encoded half-bits into an OpenTherm frame.
+ *
+ * This function tries both phase alignments (offset 0 and 1) and validates
+ * using start bit, stop bit, and parity to select the correct result.
+ *
+ * @param half_bits  Array of half-bit values (0 or 1, one per 500µs)
+ * @param hb_count   Number of elements in half_bits array
+ * @param frame      Output: decoded 32-bit frame
+ * @return ESP_OK on success
+ *         ESP_ERR_INVALID_SIZE if not enough half-bits for complete frame
+ *         ESP_ERR_INVALID_RESPONSE if decode failed (parity, start/stop bit)
+ */
+esp_err_t opentherm_decode_frame(const uint8_t *half_bits, int hb_count, uint32_t *frame);
+
 #ifdef __cplusplus
 }
 #endif

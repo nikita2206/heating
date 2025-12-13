@@ -167,3 +167,157 @@ esp_err_t opentherm_encoder_create(rmt_encoder_handle_t *ret_encoder)
     *ret_encoder = &ot_encoder->base;
     return ESP_OK;
 }
+
+// ============================================================================
+// Manchester Decoder for RX
+// ============================================================================
+
+// Frame validation constants
+#define OT_MIN_HALF_BITS    66      // Minimum for complete frame (34 bits * 2 - tolerance)
+#define OT_MAX_HALF_BITS    80      // Maximum expected (with some idle capture)
+
+/**
+ * Find the start bit in the half-bit stream.
+ *
+ * Scans ONE half-bit at a time looking for the `01` pattern (bit '1').
+ * This handles cases where there's idle capture or frame tail at the start.
+ *
+ * @return Index where start bit begins, or -1 if not found
+ */
+static int find_start_bit(const uint8_t *half_bits, int hb_count)
+{
+    // Need at least 68 half-bits from start position for a complete frame
+    // So don't look too far into the stream
+    int max_search = hb_count - 68;
+    if (max_search < 0) max_search = 0;
+
+    for (int i = 0; i <= max_search; i++) {
+        if (i + 1 < hb_count &&
+            half_bits[i] == 0 && half_bits[i + 1] == 1) {
+            // Found `01` pattern = bit '1' = potential start bit
+            return i;
+        }
+    }
+    return -1;
+}
+
+static void decode_manchester_from_position(const uint8_t *half_bits, int hb_count,
+                                             int start_pos, opentherm_decode_result_t *result)
+{
+    result->frame = 0;
+    result->errors = 0;
+    result->start_bit_valid = false;
+    result->stop_bit_valid = false;
+    result->bits_decoded = 0;
+
+    if (start_pos < 0 || start_pos + 1 >= hb_count) {
+        return;
+    }
+
+    // Verify start bit at start_pos
+    if (half_bits[start_pos] != 0 || half_bits[start_pos + 1] != 1) {
+        return;  // Not a valid start bit
+    }
+
+    result->start_bit_valid = true;
+    result->bits_decoded = 1;  // Count start bit
+
+    uint32_t decoded = 0;
+    int data_bits = 0;
+
+    // Decode 32 data bits starting from position after start bit
+    for (int i = start_pos + 2; i + 1 < hb_count && data_bits < 32; i += 2) {
+        uint8_t first_half = half_bits[i];
+        uint8_t second_half = half_bits[i + 1];
+
+        bool bit_value;
+        if (first_half == 0 && second_half == 1) {
+            bit_value = true;   // Bit 1: LOW-HIGH transition
+        } else if (first_half == 1 && second_half == 0) {
+            bit_value = false;  // Bit 0: HIGH-LOW transition
+        } else {
+            // Invalid Manchester transition (1,1 or 0,0)
+            result->errors++;
+            continue;
+        }
+
+        decoded = (decoded << 1) | (bit_value ? 1 : 0);
+        data_bits++;
+        result->bits_decoded++;
+    }
+
+    result->frame = decoded;
+
+    // Check stop bit (should be at position start_pos + 2 + 64 = start_pos + 66)
+    int stop_pos = start_pos + 66;  // 2 (start) + 64 (32 data bits)
+    if (stop_pos + 1 < hb_count) {
+        if (half_bits[stop_pos] == 0 && half_bits[stop_pos + 1] == 1) {
+            result->stop_bit_valid = true;
+            result->bits_decoded++;
+        }
+    }
+}
+
+/**
+ * Check parity of a 32-bit OpenTherm frame (even parity)
+ * Returns true if parity is correct (even number of 1s)
+ */
+static bool check_frame_parity(uint32_t frame)
+{
+    uint32_t n = frame;
+    uint32_t count = 0;
+    while (n) {
+        n &= (n - 1);
+        count++;
+    }
+    return (count % 2) == 0;
+}
+
+esp_err_t opentherm_decode_frame(const uint8_t *half_bits, int hb_count, uint32_t *frame)
+{
+    // Pre-check: enough half-bits for a complete frame?
+    if (hb_count < OT_MIN_HALF_BITS) {
+        ESP_LOGI(TAG, "Partial frame: only %d half-bits (need >=%d)", hb_count, OT_MIN_HALF_BITS);
+        return ESP_ERR_INVALID_SIZE;
+    }
+
+    // Find the start bit by scanning one half-bit at a time
+    // This handles idle capture or frame tail at the start of the buffer
+    int start_pos = find_start_bit(half_bits, hb_count);
+    if (start_pos < 0) {
+        ESP_LOGI(TAG, "Decode failed: no start bit found in %d half-bits", hb_count);
+        return ESP_ERR_INVALID_RESPONSE;
+    }
+
+    // Check if we have enough half-bits from the start position
+    int remaining = hb_count - start_pos;
+    if (remaining < 68) {
+        ESP_LOGI(TAG, "Decode failed: start at %d, only %d half-bits remaining (need 68)",
+                 start_pos, remaining);
+        return ESP_ERR_INVALID_SIZE;
+    }
+
+    // Decode from the found start position
+    opentherm_decode_result_t result;
+    decode_manchester_from_position(half_bits, hb_count, start_pos, &result);
+
+    // Validate result
+    bool valid = result.start_bit_valid &&
+                 result.bits_decoded >= 33 &&  // start + 32 data bits minimum
+                 check_frame_parity(result.frame);
+
+    if (valid) {
+        *frame = result.frame;
+        if (start_pos > 0) {
+            ESP_LOGD(TAG, "Decode OK: skipped %d half-bits to find start", start_pos);
+        }
+        return ESP_OK;
+    }
+
+    // Decode failed - log details
+    ESP_LOGI(TAG, "Decode failed: start_pos=%d, bits=%d, start=%d, stop=%d, err=%d, parity=%s",
+             start_pos, result.bits_decoded, result.start_bit_valid, result.stop_bit_valid,
+             result.errors, check_frame_parity(result.frame) ? "OK" : "BAD");
+
+    return ESP_ERR_INVALID_RESPONSE;
+}
