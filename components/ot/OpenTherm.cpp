@@ -131,7 +131,7 @@ bool OpenTherm::sendRequestAsync(unsigned long request)
     sendBit(true); // stop bit
     setIdleState();
 
-    responseTimestamp = esp_timer_get_time();
+    //responseTimestamp = esp_timer_get_time();
     status = OpenThermStatus::RESPONSE_WAITING;
 
     if (schedulerState == taskSCHEDULER_RUNNING) {
@@ -204,6 +204,81 @@ unsigned long OpenTherm::getLastResponse()
 OpenThermResponseStatus OpenTherm::getLastResponseStatus()
 {
     return responseStatus;
+}
+
+void IRAM_ATTR OpenTherm::newInterruptHandler()
+{
+    interruptCount++;
+
+    auto previousReception = lastReceptionTimestamp;
+    auto currentReception = lastReceptionTimestamp = esp_timer_get_time();
+    auto elapsed = currentReception - previousReception;
+
+    // Been more than 3sm since last reception, meaning that we must be at the start of a frame right now
+    if (elapsed > 3000000) { // 3ms
+        // First edge must be rising from idle, then go down to indicate bit 1 (start bit)
+        if (readState() == 1) {
+            status = OpenThermStatus::RESPONSE_START_BIT;
+            responseStartsAt = currentReception;
+            midBit = true;
+        } else {
+            status = OpenThermStatus::RESPONSE_INVALID;
+        }
+        return;
+    }
+
+    if (status == OpenThermStatus::RESPONSE_START_BIT) {
+        if (readState() == 0) {
+            if (elapsed > 750) {
+                status = OpenThermStatus::RESPONSE_INVALID;
+                return;
+            }
+
+            status = OpenThermStatus::RESPONSE_RECEIVING;
+            response = 0;
+            responseBitIndex = 0;
+            midBit = false;
+            return;
+        } else {
+            status = OpenThermStatus::RESPONSE_INVALID;
+        }
+    }
+
+    if (status == OpenThermStatus::RESPONSE_RECEIVING) {
+        if (midBit) {
+            // Skip this transition, we already accounted for this bit in the else branch below
+            midBit = false;
+        } else {
+            if (elapsed > 750 && elapsed < 1500) {
+                // Not in mid-bit, and raising edge, means we are in the middle of a 0 bit after a 1 bit
+                if (readState() == 1) {
+                    response = (response << 1) | 0;
+                    responseBitIndex++;
+                } else {
+                    response = (response << 1) | 1;
+                    responseBitIndex++;
+                }
+            } else if (elapsed >= 1500) {
+                status = OpenThermStatus::RESPONSE_INVALID;
+                return;
+            } else {
+                // Line transition between bits (if it transitions down, then it will go up in 500us, meaning it is going to be a 0 bit, or otherwise 1 bit)
+                midBit = true;
+                if (readState() == 0) {
+                    response = (response << 1) | 0;
+                    responseBitIndex++;
+                } else {
+                    response = (response << 1) | 1;
+                    responseBitIndex++;
+                }
+            }
+        }
+
+        if (responseBitIndex == 32) {
+            status = OpenThermStatus::RESPONSE_READY;
+            return;
+        }
+    }
 }
 
 void IRAM_ATTR OpenTherm::handleInterrupt()
@@ -296,14 +371,14 @@ void IRAM_ATTR OpenTherm::handleInterrupt()
 
 void IRAM_ATTR OpenTherm::handleInterruptHelper(void* ptr)
 {
-    static_cast<OpenTherm*>(ptr)->handleInterrupt();
+    static_cast<OpenTherm*>(ptr)->newInterruptHandler();
 }
 
 unsigned long OpenTherm::process(std::function<void(unsigned long, OpenThermResponseStatus)> callback)
 {
     portDISABLE_INTERRUPTS();
     OpenThermStatus st = status;
-    unsigned long ts = responseTimestamp;
+    unsigned long ts = lastReceptionTimestamp;
     portENABLE_INTERRUPTS();
 
     if (st == OpenThermStatus::READY)

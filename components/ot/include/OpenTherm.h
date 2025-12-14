@@ -169,6 +169,9 @@ public:
     OpenTherm(gpio_num_t inPin = GPIO_NUM_4, gpio_num_t outPin = GPIO_NUM_5, bool isSlave = false, bool invertOutput = false, bool invertInput = false);
     ~OpenTherm();
     volatile OpenThermStatus status;
+    volatile int64_t lastReceptionTimestamp;
+    volatile int64_t responseStartsAt;
+    volatile bool midBit;
     void begin();
     bool isReady();
     unsigned long sendRequest(unsigned long request);
@@ -184,6 +187,7 @@ public:
     OpenThermResponseStatus getLastResponseStatus();
     static const char *statusToString(OpenThermResponseStatus status);
     void handleInterrupt();
+    void newInterruptHandler();
     static void handleInterruptHelper(void* ptr);
     unsigned long process(std::function<void(unsigned long, OpenThermResponseStatus)> callback = nullptr);
     void end();
