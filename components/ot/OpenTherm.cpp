@@ -225,16 +225,15 @@ void IRAM_ATTR OpenTherm::handleInterrupt()
     unsigned long newTs = esp_timer_get_time();
     if (status == OpenThermStatus::RESPONSE_WAITING)
     {
-        if (readState() == 1)
+        // For inverted hardware (idle=0 on GPIO), mid-bit of start bit is falling edge (state=0)
+        // For standard hardware (idle=1 on GPIO), mid-bit of start bit is rising edge (state=1)
+        // Since we've established hardware is inverted (gpio=0 at idle), trigger on state=0
+        if (readState() == 0)
         {
             status = OpenThermStatus::RESPONSE_START_BIT;
             responseTimestamp = newTs;
         }
-        else
-        {
-            status = OpenThermStatus::RESPONSE_INVALID;
-            responseTimestamp = newTs;
-        }
+        // Ignore rising edges (start of start bit with inverted hardware)
     }
     else if (status == OpenThermStatus::RESPONSE_START_BIT)
     {
@@ -245,23 +244,24 @@ void IRAM_ATTR OpenTherm::handleInterrupt()
         // Note: for parity=1, there's a boundary falling edge at ~500us elapsed - ignore it
         unsigned long elapsed = newTs - responseTimestamp;
 
-        if (elapsed < 750)
+        if (elapsed < 600)
         {
             // Edge too soon - this is a boundary edge (parity=1 case), not mid-bit
             // Ignore and keep waiting for the mid-bit edge
         }
-        else if (elapsed < 1750)
+        else if (elapsed < 1500)
         {
             // Mid-bit edge for bit 31 (parity bit)
-            // Rising edge (state=1) = bit 31 is 1
-            // Falling edge (state=0) = bit 31 is 0
             int state = readState();
+            // Debug: capture timing and state for bit 31
+            debugBit31Elapsed = elapsed;
+            debugBit31State = state;
             status = OpenThermStatus::RESPONSE_RECEIVING;
             responseTimestamp = newTs;
             responseBitIndex = 1;  // Bit 31 sampled, next is bit 30
-            response = state ? 1 : 0;  // Start building frame MSB-first
+            response = state ? 0 : 1;  // Inverted: state=0 means bit=1
         }
-        else // elapsed >= 1750
+        else // elapsed >= 1500
         {
             status = OpenThermStatus::RESPONSE_INVALID;
             responseTimestamp = newTs;
@@ -269,14 +269,16 @@ void IRAM_ATTR OpenTherm::handleInterrupt()
     }
     else if (status == OpenThermStatus::RESPONSE_RECEIVING)
     {
-        if ((newTs - responseTimestamp) > 750)
+        // Threshold lowered from 750 to 600 to handle timing jitter
+        // Mid-bit edges are ~1000us apart, boundary edges (if any) are at ~500us
+        // 600us safely distinguishes between them while allowing some jitter
+        if ((newTs - responseTimestamp) > 600)
         {
             if (responseBitIndex < 32)
             {
                 int state = readState();
-                // For non-inverting hardware: use state directly
-                // For inverting hardware: use !state (or set invertInput=true)
-                int bit = state;
+                // Inverted hardware: state=0 means bit=1
+                int bit = !state;
                 response = (response << 1) | bit;
                 responseTimestamp = newTs;
                 responseBitIndex = responseBitIndex + 1;
@@ -285,6 +287,8 @@ void IRAM_ATTR OpenTherm::handleInterrupt()
             { // stop bit
                 status = OpenThermStatus::RESPONSE_READY;
                 responseTimestamp = newTs;
+                // Debug: store last raw frame for logging
+                lastRawFrame = response;
             }
         }
     }

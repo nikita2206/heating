@@ -9,19 +9,19 @@
 #include <Arduino.h>
 #include <OpenTherm.h>
 
-// GPIO Configuration for ESP32
-// Master interface (connects to boiler)
-const int mInPin = 21;   // RX from boiler
-const int mOutPin = 22;  // TX to boiler
+// GPIO Configuration for ESP32 (matching opentherm_gateway.c)
+// Master interface - gateway acts as master to boiler (sends requests, receives responses)
+const int mInPin = 13;   // OT_SLAVE_IN_PIN - RX from boiler
+const int mOutPin = 14;  // OT_SLAVE_OUT_PIN - TX to boiler
 
-// Slave interface (connects to thermostat)
-const int sInPin = 19;   // RX from thermostat
-const int sOutPin = 23;  // TX to thermostat
+// Slave interface - gateway acts as slave to thermostat (receives requests, sends responses)
+const int sInPin = 25;   // OT_MASTER_IN_PIN - RX from thermostat
+const int sOutPin = 26;  // OT_MASTER_OUT_PIN - TX to thermostat
 
 // Create OpenTherm instances
-// Master mode for communicating with boiler
+// Master mode: we send requests to boiler and receive its responses
 OpenTherm mOT(mInPin, mOutPin);
-// Slave mode for receiving from thermostat
+// Slave mode: we receive requests from thermostat and send responses back
 OpenTherm sOT(sInPin, sOutPin, true);
 
 // Interrupt handlers for Manchester encoding
@@ -67,6 +67,17 @@ void setup()
     Serial.printf("Master: IN=%d, OUT=%d\n", mInPin, mOutPin);
     Serial.printf("Slave:  IN=%d, OUT=%d\n", sInPin, sOutPin);
 
+    // Explicitly configure pins before OpenTherm init
+    // Output pins: start HIGH (idle state for OpenTherm)
+    pinMode(mOutPin, OUTPUT);
+    digitalWrite(mOutPin, HIGH);
+    pinMode(sOutPin, OUTPUT);
+    digitalWrite(sOutPin, HIGH);
+
+    // Input pins: enable pull-up (OpenTherm idle is HIGH)
+    pinMode(mInPin, INPUT_PULLUP);
+    pinMode(sInPin, INPUT_PULLUP);
+
     // Initialize master interface (to boiler)
     mOT.begin(mHandleInterrupt);
     Serial.println("Master interface initialized");
@@ -85,14 +96,3 @@ void loop()
     sOT.process();
 }
 
-// Arduino entry point for ESP-IDF
-extern "C" void app_main()
-{
-    initArduino();
-    setup();
-
-    while (true) {
-        loop();
-        vTaskDelay(1);  // Small delay to prevent watchdog issues
-    }
-}

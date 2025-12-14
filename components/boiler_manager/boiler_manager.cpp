@@ -354,6 +354,11 @@ private:
                 uint8_t dataId = reqFrame.dataId();
                 auto msgType = reqFrame.messageType();
 
+                // DEBUG: Log EVERY frame with bit 31 debug info
+                ESP_LOGI(TAG, "Frame: ID=%d type=%s status=%s raw=0x%08lX bit31:[elapsed=%lu state=%d]",
+                         dataId, toString(msgType), OpenTherm::statusToString(status), request,
+                         thermostat_->debugBit31Elapsed, thermostat_->debugBit31State);
+
                 // Log ALL frames including invalid - to debug ID=0 issue
                 if (status == OpenThermResponseStatus::INVALID) {
                     invalidFrames++;

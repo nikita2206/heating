@@ -1,5 +1,5 @@
 # Arduino configuration
-CONFIG_AUTOSTART_ARDUINO=n
+CONFIG_AUTOSTART_ARDUINO=y
 
 # Serial flasher config
 CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y

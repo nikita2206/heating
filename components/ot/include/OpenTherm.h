@@ -236,6 +236,9 @@ private:
 
 public:
     volatile uint32_t interruptCount = 0;  // Debug: count interrupts
+    volatile unsigned long lastRawFrame = 0;  // Debug: last successfully received frame
+    volatile unsigned long debugBit31Elapsed = 0;  // Debug: elapsed time when sampling bit 31
+    volatile int debugBit31State = 0;  // Debug: state when sampling bit 31
 private:
 
     int readState();
