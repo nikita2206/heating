@@ -8,6 +8,7 @@ ESP-IDF port
 #include "driver/gpio.h"
 #include "esp_timer.h"
 #include "esp_rom_sys.h"
+#include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
@@ -131,7 +132,7 @@ bool OpenTherm::sendRequestAsync(unsigned long request)
     sendBit(true); // stop bit
     setIdleState();
 
-    //responseTimestamp = esp_timer_get_time();
+    responseTimestamp = esp_timer_get_time();
     status = OpenThermStatus::RESPONSE_WAITING;
 
     if (schedulerState == taskSCHEDULER_RUNNING) {
@@ -206,84 +207,33 @@ OpenThermResponseStatus OpenTherm::getLastResponseStatus()
     return responseStatus;
 }
 
-void IRAM_ATTR OpenTherm::newInterruptHandler()
-{
-    interruptCount++;
-
-    auto previousReception = lastReceptionTimestamp;
-    auto currentReception = lastReceptionTimestamp = esp_timer_get_time();
-    auto elapsed = currentReception - previousReception;
-
-    // Been more than 3sm since last reception, meaning that we must be at the start of a frame right now
-    if (elapsed > 3000000) { // 3ms
-        // First edge must be rising from idle, then go down to indicate bit 1 (start bit)
-        if (readState() == 1) {
-            status = OpenThermStatus::RESPONSE_START_BIT;
-            responseStartsAt = currentReception;
-            midBit = true;
-        } else {
-            status = OpenThermStatus::RESPONSE_INVALID;
-        }
-        return;
-    }
-
-    if (status == OpenThermStatus::RESPONSE_START_BIT) {
-        if (readState() == 0) {
-            if (elapsed > 750) {
-                status = OpenThermStatus::RESPONSE_INVALID;
-                return;
-            }
-
-            status = OpenThermStatus::RESPONSE_RECEIVING;
-            response = 0;
-            responseBitIndex = 0;
-            midBit = false;
-            return;
-        } else {
-            status = OpenThermStatus::RESPONSE_INVALID;
-        }
-    }
-
-    if (status == OpenThermStatus::RESPONSE_RECEIVING) {
-        if (midBit) {
-            // Skip this transition, we already accounted for this bit in the else branch below
-            midBit = false;
-        } else {
-            if (elapsed > 750 && elapsed < 1500) {
-                // Not in mid-bit, and raising edge, means we are in the middle of a 0 bit after a 1 bit
-                if (readState() == 1) {
-                    response = (response << 1) | 0;
-                    responseBitIndex++;
-                } else {
-                    response = (response << 1) | 1;
-                    responseBitIndex++;
-                }
-            } else if (elapsed >= 1500) {
-                status = OpenThermStatus::RESPONSE_INVALID;
-                return;
-            } else {
-                // Line transition between bits (if it transitions down, then it will go up in 500us, meaning it is going to be a 0 bit, or otherwise 1 bit)
-                midBit = true;
-                if (readState() == 0) {
-                    response = (response << 1) | 0;
-                    responseBitIndex++;
-                } else {
-                    response = (response << 1) | 1;
-                    responseBitIndex++;
-                }
-            }
-        }
-
-        if (responseBitIndex == 32) {
-            status = OpenThermStatus::RESPONSE_READY;
-            return;
-        }
-    }
-}
+constexpr uint64_t STATE_BIT = 1ULL << 63;
+constexpr uint64_t DUR_MASK  = ~STATE_BIT;
 
 void IRAM_ATTR OpenTherm::handleInterrupt()
 {
     interruptCount++;
+
+    // Precise bit tracking for debugging
+    {
+        auto currentTimestamp = esp_timer_get_time();
+        auto delta = currentTimestamp - lastReceptionTimestamp;
+
+        if (delta > 3000000ULL || interruptIndex > 68) { // 3ms
+            // Too long since last reception, reset the interrupt index
+            interruptIndex = 0;
+        }
+
+        // Edge ISR: current pin level is the *new* level,
+        // duration belongs to the *previous* level
+        const bool prevLevel = !readState();
+
+        // Set the pin state in the highest bit of the interrupt timestamp
+        // The pin is also inverted, because if our current staet is 0, it means it was 1 before that
+        interruptTimestamps[interruptIndex++] = (prevLevel ? STATE_BIT : 0ULL) | (delta & DUR_MASK);
+
+        lastReceptionTimestamp = currentTimestamp;
+    }
 
     if (isReady())
     {
@@ -371,15 +321,25 @@ void IRAM_ATTR OpenTherm::handleInterrupt()
 
 void IRAM_ATTR OpenTherm::handleInterruptHelper(void* ptr)
 {
-    static_cast<OpenTherm*>(ptr)->newInterruptHandler();
+    static_cast<OpenTherm*>(ptr)->handleInterrupt();
 }
 
 unsigned long OpenTherm::process(std::function<void(unsigned long, OpenThermResponseStatus)> callback)
 {
     portDISABLE_INTERRUPTS();
     OpenThermStatus st = status;
-    unsigned long ts = lastReceptionTimestamp;
+    unsigned long ts = responseTimestamp;
+    auto currentInterrupIdx = interruptIndex;
     portENABLE_INTERRUPTS();
+
+    // Parse collected interrupts and log all the parsed bits if parsing was successful
+    {
+        auto parsedFrame = parseInterrupts(interruptTimestamps, currentInterrupIdx);
+        if (parsedFrame != 0) {
+            // Print as binary string (e.g. 01010101)
+            logU32Bin(parsedFrame);
+        }
+    }
 
     if (st == OpenThermStatus::READY)
         return 0;
@@ -656,6 +616,109 @@ float OpenTherm::getPressure()
 unsigned char OpenTherm::getFault()
 {
     return ((sendRequest(buildRequest(OpenThermRequestType::READ, OpenThermMessageID::ASFflags, 0)) >> 8) & 0xff);
+}
+
+
+static inline bool seg_level(uint64_t packed) {
+    return (packed & STATE_BIT) != 0;               // MSB is level
+}
+static inline uint32_t seg_dur_us(uint64_t packed) {
+    return static_cast<uint32_t>(packed & DUR_MASK); // low 63 bits
+}
+
+static inline int popcount32(uint32_t v) {
+#if defined(__GNUC__)
+    return __builtin_popcount(v);
+#else
+    int c = 0;
+    while (v) { c += (v & 1u); v >>= 1; }
+    return c;
+#endif
+}
+
+uint32_t OpenTherm::parseInterrupts(uint64_t interrupts[69], int upToIndex)
+{
+    // Need at least: idle + a bunch of segments
+    if (upToIndex < 4) return 0;
+
+    // Expect first entry to be the long idle period before the start bit
+    // We'll just skip index 0 unconditionally.
+    int i = 1;
+
+    // Manchester half-bit is ~500us (bit is ~1000us).
+    constexpr int HALF_US_NOM = 500;
+
+    // Loose tolerances: classify segment as 1 half-bit (~500us) or 2 half-bits (~1000us).
+    constexpr int ONE_MIN = 300;
+    constexpr int ONE_MAX = 700;
+    constexpr int TWO_MIN = 700;
+    constexpr int TWO_MAX = 1300;
+
+    // We want start(1) + 32 frame + stop(1) = 34 bits => 69 half-bits.
+    bool halfLevels[69];
+    int halfCount = 0;
+
+    while (i < upToIndex && halfCount < 69) {
+        const bool level = seg_level(interrupts[i]);
+        const uint32_t dur = seg_dur_us(interrupts[i]);
+
+        int halves = 0;
+        if (dur >= ONE_MIN && dur < ONE_MAX) halves = 1;
+        else if (dur >= TWO_MIN && dur <= TWO_MAX) halves = 2;
+        else {
+            // Allow a final trailing idle to be long; stop if we already have enough
+            // or treat as invalid if it appears mid-frame.
+            return 0;
+        }
+
+        for (int k = 0; k < halves && halfCount < 69; ++k) {
+            halfLevels[halfCount++] = level;
+        }
+        ++i;
+    }
+
+    if (halfCount != 68) return 0;
+
+    // Decode 34 Manchester bits from pairs of half-levels.
+    // With your described start: idle low -> high then low indicates first bit=1,
+    // we assume: active=HIGH, idle=LOW, and:
+    //   bit '1' = active-to-idle = HIGH->LOW
+    //   bit '0' = idle-to-active = LOW->HIGH :contentReference[oaicite:2]{index=2}
+    uint8_t bits[34];
+    for (int b = 0; b < 34; ++b) {
+        const bool a = halfLevels[2 * b];
+        const bool c = halfLevels[2 * b + 1];
+        if (a == c) return 0; // invalid Manchester (no mid-bit transition)
+
+        if (a == 1 && c == 0) bits[b] = 1;
+        else if (a == 0 && c == 1) bits[b] = 0;
+        else return 0;
+    }
+
+    // Start/stop bits must be '1' (outside the 32-bit frame). :contentReference[oaicite:3]{index=3}
+    if (bits[0] != 1) return 0;
+    if (bits[33] != 1) return 0;
+
+    // Build the 32-bit frame from bits[1..32], MSB first.
+    uint32_t frame = 0;
+    for (int b = 1; b <= 32; ++b) {
+        frame = (frame << 1) | (bits[b] & 1u);
+    }
+
+    // Parity: total number of '1' bits in entire 32 bits must be even. :contentReference[oaicite:4]{index=4}
+    if ((popcount32(frame) & 1) != 0) return 0;
+
+    return frame;
+}
+
+void OpenTherm::logU32Bin(uint32_t v)
+{
+    char buf[33];
+    for (int i = 31; i >= 0; --i) {
+        buf[31 - i] = (v & (1u << i)) ? '1' : '0';
+    }
+    buf[32] = '\0';
+    ESP_LOGI("OT", "Incoming frame from %s: %s", isSlave ? "T" : "B", buf);
 }
 
 } // namespace ot

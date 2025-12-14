@@ -3,3 +3,7 @@ idf_component_register(
     INCLUDE_DIRS "include"
     REQUIRES driver esp_timer freertos
 )
+
+if(BUILD_TESTING)
+    add_subdirectory(test)
+endif()

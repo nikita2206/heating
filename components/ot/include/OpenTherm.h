@@ -172,6 +172,8 @@ public:
     volatile int64_t lastReceptionTimestamp;
     volatile int64_t responseStartsAt;
     volatile bool midBit;
+    uint64_t interruptTimestamps[69];
+    int interruptIndex = 0;
     void begin();
     bool isReady();
     unsigned long sendRequest(unsigned long request);
@@ -249,6 +251,8 @@ private:
     void setActiveState();
     void setIdleState();
     void activateBoiler();
+    uint32_t parseInterrupts(uint64_t interrupts[69], int upToIndex);
+    void logU32Bin(uint32_t v);
 
     void sendBit(bool high);
 };

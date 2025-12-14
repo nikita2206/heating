@@ -10,6 +10,18 @@
       "type": "espidf",
       "name": "Launch",
       "request": "launch"
+    },
+    {
+      "name": "Debug single CPP file",
+      "program": "${workspaceFolder}/test",
+      "args": [],
+      "cwd": "${workspaceFolder}",
+      "stopAtEntry": true,
+      "type": "cppdbg",
+      "request": "launch",
+      "MIMode": "lldb",
+      "MIDebuggerPath": "/usr/bin/lldb"
     }
+    
   ]
 }
