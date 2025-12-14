@@ -15,6 +15,12 @@ ESP-IDF port
 // Helper macro for bit reading
 #define bitRead(value, bit) (((value) >> (bit)) & 0x01)
 
+static void monitorTaskEntry(void* pvParameters) {
+    ot::OpenTherm* otInstance = static_cast<ot::OpenTherm*>(pvParameters);
+    otInstance->monitorInterrupts();
+    vTaskDelete(nullptr);
+}
+
 namespace ot {
 
 OpenTherm::OpenTherm(gpio_num_t inPin, gpio_num_t outPin, bool isSlave, bool invertOutput, bool invertInput) :
@@ -58,6 +64,22 @@ void OpenTherm::begin()
     gpio_isr_handler_add(inPin, OpenTherm::handleInterruptHelper, this);
     activateBoiler();
     status = OpenThermStatus::READY;
+
+    // Create monitoring task
+    BaseType_t ret = xTaskCreatePinnedToCore(
+        monitorTaskEntry,
+        "ot_monitor",
+        4096, // Stack size (bytes) - adjust as needed
+        this,
+        configMAX_PRIORITIES - 1, // High priority
+        &monitorTaskHandle_,
+        0 // Core ID (0 or 1 on ESP32, or tskNO_AFFINITY)
+    );
+
+    if (ret != pdPASS) {
+        ESP_LOGE("OpenTherm", "Failed to create monitor task");
+        monitorTaskHandle_ = nullptr;
+    }
 }
 
 bool IRAM_ATTR OpenTherm::isReady()
@@ -207,8 +229,8 @@ OpenThermResponseStatus OpenTherm::getLastResponseStatus()
     return responseStatus;
 }
 
-constexpr uint64_t STATE_BIT = 1ULL << 63;
-constexpr uint64_t DUR_MASK  = ~STATE_BIT;
+constexpr uint32_t STATE_BIT = 1 << 31;
+constexpr uint32_t DUR_MASK  = ~STATE_BIT;
 
 void IRAM_ATTR OpenTherm::handleInterrupt()
 {
@@ -216,23 +238,27 @@ void IRAM_ATTR OpenTherm::handleInterrupt()
 
     // Precise bit tracking for debugging
     {
-        auto currentTimestamp = esp_timer_get_time();
-        auto delta = currentTimestamp - lastReceptionTimestamp;
-
-        if (delta > 3000000ULL || interruptIndex > 68) { // 3ms
-            // Too long since last reception, reset the interrupt index
-            interruptIndex = 0;
-        }
+        uint64_t currentTimestamp = esp_timer_get_time();
+        auto delta = static_cast<uint32_t>(currentTimestamp - lastReceptionTimestamp);
 
         // Edge ISR: current pin level is the *new* level,
         // duration belongs to the *previous* level
         const bool prevLevel = !readState();
+        uint32_t saveInterrupt = (prevLevel ? STATE_BIT : 0) | (delta & DUR_MASK);
 
-        // Set the pin state in the highest bit of the interrupt timestamp
-        // The pin is also inverted, because if our current staet is 0, it means it was 1 before that
-        interruptTimestamps[interruptIndex++] = (prevLevel ? STATE_BIT : 0ULL) | (delta & DUR_MASK);
+        interruptTimestamps[interruptsUpToIndex] = saveInterrupt;
+        interruptsUpToIndex = (interruptsUpToIndex + 1) % 68;
 
         lastReceptionTimestamp = currentTimestamp;
+
+        // signal to the monitoring thread
+        if (monitorTaskHandle_ != nullptr) {
+            BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+            vTaskNotifyGiveFromISR(monitorTaskHandle_, &xHigherPriorityTaskWoken);
+            if (xHigherPriorityTaskWoken == pdTRUE) {
+                portYIELD_FROM_ISR();
+            }
+        }
     }
 
     if (isReady())
@@ -324,22 +350,35 @@ void IRAM_ATTR OpenTherm::handleInterruptHelper(void* ptr)
     static_cast<OpenTherm*>(ptr)->handleInterrupt();
 }
 
-unsigned long OpenTherm::process(std::function<void(unsigned long, OpenThermResponseStatus)> callback)
+void OpenTherm::monitorInterrupts()
 {
-    portDISABLE_INTERRUPTS();
-    OpenThermStatus st = status;
-    unsigned long ts = responseTimestamp;
-    auto currentInterrupIdx = interruptIndex;
-    portENABLE_INTERRUPTS();
+    uint32_t interruptTimestampsCopy[68];
 
-    // Parse collected interrupts and log all the parsed bits if parsing was successful
-    {
-        auto parsedFrame = parseInterrupts(interruptTimestamps, currentInterrupIdx);
+    // Wait for ESP notifications to this thread
+    while (true) {
+        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+        ESP_LOGI("OT", "Scanning interrupts");
+
+        // Fast copy of interrupt timestamps, starting from interruptsUpToIndex
+        for (int i = 0; i < 68; i++) {
+            interruptTimestampsCopy[i] = interruptTimestamps[(i + interruptsUpToIndex) % 68];
+        }
+
+        auto parsedFrame = parseInterrupts(interruptTimestampsCopy, 67);
         if (parsedFrame != 0) {
             // Print as binary string (e.g. 01010101)
             logU32Bin(parsedFrame);
         }
     }
+}
+
+unsigned long OpenTherm::process(std::function<void(unsigned long, OpenThermResponseStatus)> callback)
+{
+    portDISABLE_INTERRUPTS();
+    OpenThermStatus st = status;
+    unsigned long ts = responseTimestamp;
+    auto currentInterrupIdx = interruptsUpToIndex;
+    portENABLE_INTERRUPTS();
 
     if (st == OpenThermStatus::READY)
         return 0;
@@ -362,7 +401,8 @@ unsigned long OpenTherm::process(std::function<void(unsigned long, OpenThermResp
     {
         status = OpenThermStatus::DELAY;
         responseStatus = (isSlave ? isValidRequest(response) : isValidResponse(response)) ? OpenThermResponseStatus::SUCCESS : OpenThermResponseStatus::INVALID;
-        if (callback) callback(response, responseStatus);
+        // commenting to break it
+        //if (callback) callback(response, responseStatus);
         return response;
     }
     else if (st == OpenThermStatus::DELAY)
@@ -440,6 +480,10 @@ bool OpenTherm::isValidRequest(unsigned long request)
 void OpenTherm::end()
 {
     gpio_isr_handler_remove(inPin);
+    if (monitorTaskHandle_ != nullptr) {
+        vTaskDelete(monitorTaskHandle_);
+        monitorTaskHandle_ = nullptr;
+    }
 }
 
 OpenTherm::~OpenTherm()
@@ -619,11 +663,11 @@ unsigned char OpenTherm::getFault()
 }
 
 
-static inline bool seg_level(uint64_t packed) {
+static inline bool seg_level(uint32_t packed) {
     return (packed & STATE_BIT) != 0;               // MSB is level
 }
-static inline uint32_t seg_dur_us(uint64_t packed) {
-    return static_cast<uint32_t>(packed & DUR_MASK); // low 63 bits
+static inline uint32_t seg_dur_us(uint32_t packed) {
+    return packed & DUR_MASK;
 }
 
 static inline int popcount32(uint32_t v) {
@@ -636,7 +680,7 @@ static inline int popcount32(uint32_t v) {
 #endif
 }
 
-uint32_t OpenTherm::parseInterrupts(uint64_t interrupts[69], int upToIndex)
+uint32_t OpenTherm::parseInterrupts(uint32_t interrupts[68], int upToIndex)
 {
     // Need at least: idle + a bunch of segments
     if (upToIndex < 4) return 0;

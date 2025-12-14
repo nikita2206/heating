@@ -16,6 +16,8 @@ P MGS-TYPE SPARE DATA-ID  DATA-VALUE
 #include <stdint.h>
 #include <functional>
 #include "driver/gpio.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 
 namespace ot {
 
@@ -166,14 +168,15 @@ enum class OpenThermStatus : uint8_t
 class OpenTherm
 {
 public:
+    friend void monitorTaskEntry(void* pvParameters);
     OpenTherm(gpio_num_t inPin = GPIO_NUM_4, gpio_num_t outPin = GPIO_NUM_5, bool isSlave = false, bool invertOutput = false, bool invertInput = false);
     ~OpenTherm();
     volatile OpenThermStatus status;
     volatile int64_t lastReceptionTimestamp;
     volatile int64_t responseStartsAt;
     volatile bool midBit;
-    uint64_t interruptTimestamps[69];
-    int interruptIndex = 0;
+    uint32_t interruptTimestamps[68];
+    int interruptsUpToIndex = 0;
     void begin();
     bool isReady();
     unsigned long sendRequest(unsigned long request);
@@ -228,6 +231,9 @@ public:
     float getPressure();
     unsigned char getFault();
 
+
+    void monitorInterrupts();
+
 private:
     const gpio_num_t inPin;
     const gpio_num_t outPin;
@@ -251,8 +257,10 @@ private:
     void setActiveState();
     void setIdleState();
     void activateBoiler();
-    uint32_t parseInterrupts(uint64_t interrupts[69], int upToIndex);
+    uint32_t parseInterrupts(uint32_t interrupts[68], int upToIndex);
     void logU32Bin(uint32_t v);
+
+    TaskHandle_t monitorTaskHandle_;
 
     void sendBit(bool high);
 };
