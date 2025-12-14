@@ -1,0 +1,21 @@
+# Arduino configuration
+CONFIG_AUTOSTART_ARDUINO=n
+
+# Serial flasher config
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+
+# Partition Table
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+
+# FreeRTOS
+CONFIG_FREERTOS_HZ=1000
+
+# Compiler options
+CONFIG_COMPILER_CXX_EXCEPTIONS=y
+
+# Increase main task stack size for Arduino compatibility
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
+
+# ESP32 specific
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y

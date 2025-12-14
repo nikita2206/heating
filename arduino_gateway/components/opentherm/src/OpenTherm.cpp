@@ -1,63 +1,66 @@
 /*
-OpenTherm.cpp - OpenTherm Communication Library for ESP-IDF
+OpenTherm.cpp - OpenTherm Communication Library For Arduino, ESP8266, ESP32
 Copyright 2023, Ihor Melnyk
-ESP-IDF port
 */
 
 #include "OpenTherm.h"
-#include "driver/gpio.h"
-#include "esp_timer.h"
-#include "esp_rom_sys.h"
-#include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
+#if !defined(__AVR__)
+#include "FunctionalInterrupt.h"
+#endif
 
-// Helper macro for bit reading
-#define bitRead(value, bit) (((value) >> (bit)) & 0x01)
-
-namespace ot {
-
-OpenTherm::OpenTherm(gpio_num_t inPin, gpio_num_t outPin, bool isSlave, bool invertOutput, bool invertInput) :
+OpenTherm::OpenTherm(int inPin, int outPin, bool isSlave) :
     status(OpenThermStatus::NOT_INITIALIZED),
     inPin(inPin),
     outPin(outPin),
     isSlave(isSlave),
-    invertOutput(invertOutput),
-    invertInput(invertInput),
     response(0),
     responseStatus(OpenThermResponseStatus::NONE),
-    responseTimestamp(0)
+    responseTimestamp(0),
+    processResponseCallback(NULL)
 {
 }
 
-void OpenTherm::begin()
+void OpenTherm::begin(void (*handleInterruptCallback)(void))
 {
-    // Configure input pin (no internal pull-up - OpenTherm interface has its own)
-    gpio_config_t in_conf = {
-        .pin_bit_mask = (1ULL << inPin),
-        .mode = GPIO_MODE_INPUT,
-        .pull_up_en = GPIO_PULLUP_DISABLE,
-        .pull_down_en = GPIO_PULLDOWN_DISABLE,
-        .intr_type = GPIO_INTR_ANYEDGE,
-    };
-    gpio_config(&in_conf);
-
-    // Configure output pin
-    gpio_config_t out_conf = {
-        .pin_bit_mask = (1ULL << outPin),
-        .mode = GPIO_MODE_OUTPUT,
-        .pull_up_en = GPIO_PULLUP_DISABLE,
-        .pull_down_en = GPIO_PULLDOWN_DISABLE,
-        .intr_type = GPIO_INTR_DISABLE,
-    };
-    gpio_config(&out_conf);
-
-    // Install ISR service if not already installed
-    gpio_install_isr_service(0);
-
-    gpio_isr_handler_add(inPin, OpenTherm::handleInterruptHelper, this);
+    pinMode(inPin, INPUT);
+    pinMode(outPin, OUTPUT);
+    if (handleInterruptCallback != NULL)
+    {
+        attachInterrupt(digitalPinToInterrupt(inPin), handleInterruptCallback, CHANGE);
+    }
+    else
+    {
+#if !defined(__AVR__)
+        attachInterruptArg(
+            digitalPinToInterrupt(inPin),
+            OpenTherm::handleInterruptHelper,
+            this,
+            CHANGE
+        );
+#endif
+    }
     activateBoiler();
     status = OpenThermStatus::READY;
 }
+
+void OpenTherm::begin(void (*handleInterruptCallback)(void), void (*processResponseCallback)(unsigned long, OpenThermResponseStatus))
+{
+    begin(handleInterruptCallback);
+    this->processResponseCallback = processResponseCallback;
+}
+
+#if !defined(__AVR__)
+void OpenTherm::begin()
+{
+    begin(NULL);
+}
+
+void OpenTherm::begin(std::function<void(unsigned long, OpenThermResponseStatus)> processResponseFunction)
+{
+    begin();
+    this->processResponseFunction = processResponseFunction;
+}
+#endif
 
 bool IRAM_ATTR OpenTherm::isReady()
 {
@@ -66,24 +69,23 @@ bool IRAM_ATTR OpenTherm::isReady()
 
 int IRAM_ATTR OpenTherm::readState()
 {
-    int level = gpio_get_level(inPin);
-    return invertInput ? !level : level;
+    return digitalRead(inPin);
 }
 
 void OpenTherm::setActiveState()
 {
-    gpio_set_level(outPin, invertOutput ? 1 : 0);
+    digitalWrite(outPin, LOW);
 }
 
 void OpenTherm::setIdleState()
 {
-    gpio_set_level(outPin, invertOutput ? 0 : 1);
+    digitalWrite(outPin, HIGH);
 }
 
 void OpenTherm::activateBoiler()
 {
     setIdleState();
-    vTaskDelay(pdMS_TO_TICKS(1000));
+    delay(1000);
 }
 
 void OpenTherm::sendBit(bool high)
@@ -92,22 +94,22 @@ void OpenTherm::sendBit(bool high)
         setActiveState();
     else
         setIdleState();
-    esp_rom_delay_us(500);
+    delayMicroseconds(500);
     if (high)
         setIdleState();
     else
         setActiveState();
-    esp_rom_delay_us(500);
+    delayMicroseconds(500);
 }
 
 bool OpenTherm::sendRequestAsync(unsigned long request)
 {
-    portDISABLE_INTERRUPTS();
+    noInterrupts();
     const bool ready = isReady();
 
     if (!ready)
     {
-        portENABLE_INTERRUPTS();
+        interrupts();
         return false;
     }
 
@@ -115,28 +117,32 @@ bool OpenTherm::sendRequestAsync(unsigned long request)
     response = 0;
     responseStatus = OpenThermResponseStatus::NONE;
 
+#ifdef INC_FREERTOS_H
     BaseType_t schedulerState = xTaskGetSchedulerState();
     if (schedulerState == taskSCHEDULER_RUNNING)
     {
         vTaskSuspendAll();
     }
+#endif
 
-    portENABLE_INTERRUPTS();
+    interrupts();
 
-    sendBit(true); // start bit
+    sendBit(HIGH); // start bit
     for (int i = 31; i >= 0; i--)
     {
         sendBit(bitRead(request, i));
     }
-    sendBit(true); // stop bit
+    sendBit(HIGH); // stop bit
     setIdleState();
 
-    responseTimestamp = esp_timer_get_time();
+    responseTimestamp = micros();
     status = OpenThermStatus::RESPONSE_WAITING;
 
+#ifdef INC_FREERTOS_H
     if (schedulerState == taskSCHEDULER_RUNNING) {
         xTaskResumeAll();
     }
+#endif
 
     return true;
 }
@@ -151,20 +157,19 @@ unsigned long OpenTherm::sendRequest(unsigned long request)
     while (!isReady())
     {
         process();
-        taskYIELD();
+        yield();
     }
     return response;
 }
 
 bool OpenTherm::sendResponse(unsigned long request)
 {
-    portDISABLE_INTERRUPTS();
-    // Allow sending response when READY or DELAY (after receiving a request in slave mode)
-    const bool canSend = (status == OpenThermStatus::READY || status == OpenThermStatus::DELAY);
+    noInterrupts();
+    const bool ready = isReady();
 
-    if (!canSend)
+    if (!ready)
     {
-        portENABLE_INTERRUPTS();
+        interrupts();
         return false;
     }
 
@@ -172,26 +177,30 @@ bool OpenTherm::sendResponse(unsigned long request)
     response = 0;
     responseStatus = OpenThermResponseStatus::NONE;
 
+#ifdef INC_FREERTOS_H
     BaseType_t schedulerState = xTaskGetSchedulerState();
     if (schedulerState == taskSCHEDULER_RUNNING)
     {
         vTaskSuspendAll();
     }
+#endif
 
-    portENABLE_INTERRUPTS();
+    interrupts();
 
-    sendBit(true); // start bit
+    sendBit(HIGH); // start bit
     for (int i = 31; i >= 0; i--)
     {
         sendBit(bitRead(request, i));
     }
-    sendBit(true); // stop bit
+    sendBit(HIGH); // stop bit
     setIdleState();
     status = OpenThermStatus::READY;
 
+#ifdef INC_FREERTOS_H
     if (schedulerState == taskSCHEDULER_RUNNING) {
         xTaskResumeAll();
     }
+#endif
 
     return true;
 }
@@ -208,11 +217,9 @@ OpenThermResponseStatus OpenTherm::getLastResponseStatus()
 
 void IRAM_ATTR OpenTherm::handleInterrupt()
 {
-    interruptCount++;
-
     if (isReady())
     {
-        if (isSlave && readState() == 1)
+        if (isSlave && readState() == HIGH)
         {
             status = OpenThermStatus::RESPONSE_WAITING;
         }
@@ -222,10 +229,10 @@ void IRAM_ATTR OpenTherm::handleInterrupt()
         }
     }
 
-    unsigned long newTs = esp_timer_get_time();
+    unsigned long newTs = micros();
     if (status == OpenThermStatus::RESPONSE_WAITING)
     {
-        if (readState() == 1)
+        if (readState() == HIGH)
         {
             status = OpenThermStatus::RESPONSE_START_BIT;
             responseTimestamp = newTs;
@@ -238,30 +245,13 @@ void IRAM_ATTR OpenTherm::handleInterrupt()
     }
     else if (status == OpenThermStatus::RESPONSE_START_BIT)
     {
-        // After start bit rising edge (at T=500us into start bit), wait for mid-bit edge of bit 31
-        // The mid-bit edge should come at ~1000us elapsed (T=1500us into frame)
-        // For parity=1: mid-bit is rising edge (state=1)
-        // For parity=0: mid-bit is falling edge (state=0)
-        // Note: for parity=1, there's a boundary falling edge at ~500us elapsed - ignore it
-        unsigned long elapsed = newTs - responseTimestamp;
-
-        if (elapsed < 750)
+        if ((newTs - responseTimestamp < 750) && readState() == LOW)
         {
-            // Edge too soon - this is a boundary edge (parity=1 case), not mid-bit
-            // Ignore and keep waiting for the mid-bit edge
-        }
-        else if (elapsed < 1750)
-        {
-            // Mid-bit edge for bit 31 (parity bit)
-            // Rising edge (state=1) = bit 31 is 1
-            // Falling edge (state=0) = bit 31 is 0
-            int state = readState();
             status = OpenThermStatus::RESPONSE_RECEIVING;
             responseTimestamp = newTs;
-            responseBitIndex = 1;  // Bit 31 sampled, next is bit 30
-            response = state ? 1 : 0;  // Start building frame MSB-first
+            responseBitIndex = 0;
         }
-        else // elapsed >= 1750
+        else
         {
             status = OpenThermStatus::RESPONSE_INVALID;
             responseTimestamp = newTs;
@@ -273,11 +263,7 @@ void IRAM_ATTR OpenTherm::handleInterrupt()
         {
             if (responseBitIndex < 32)
             {
-                int state = readState();
-                // For non-inverting hardware: use state directly
-                // For inverting hardware: use !state (or set invertInput=true)
-                int bit = state;
-                response = (response << 1) | bit;
+                response = (response << 1) | !readState();
                 responseTimestamp = newTs;
                 responseBitIndex = responseBitIndex + 1;
             }
@@ -290,41 +276,54 @@ void IRAM_ATTR OpenTherm::handleInterrupt()
     }
 }
 
+#if !defined(__AVR__)
 void IRAM_ATTR OpenTherm::handleInterruptHelper(void* ptr)
 {
     static_cast<OpenTherm*>(ptr)->handleInterrupt();
 }
+#endif
 
-unsigned long OpenTherm::process(std::function<void(unsigned long, OpenThermResponseStatus)> callback)
+void OpenTherm::processResponse()
 {
-    portDISABLE_INTERRUPTS();
+    if (processResponseCallback != NULL)
+    {
+        processResponseCallback(response, responseStatus);
+    }
+#if !defined(__AVR__)
+    if (this->processResponseFunction != NULL)
+    {
+        processResponseFunction(response, responseStatus);
+    }
+#endif
+}
+
+void OpenTherm::process()
+{
+    noInterrupts();
     OpenThermStatus st = status;
     unsigned long ts = responseTimestamp;
-    portENABLE_INTERRUPTS();
+    interrupts();
 
     if (st == OpenThermStatus::READY)
-        return 0;
-    unsigned long newTs = esp_timer_get_time();
+        return;
+    unsigned long newTs = micros();
     if (st != OpenThermStatus::NOT_INITIALIZED && st != OpenThermStatus::DELAY && (newTs - ts) > 1000000)
     {
         status = OpenThermStatus::READY;
         responseStatus = OpenThermResponseStatus::TIMEOUT;
-        if (callback) callback(response, responseStatus);
-        return response;
+        processResponse();
     }
     else if (st == OpenThermStatus::RESPONSE_INVALID)
     {
         status = OpenThermStatus::DELAY;
         responseStatus = OpenThermResponseStatus::INVALID;
-        if (callback) callback(response, responseStatus);
-        return response;
+        processResponse();
     }
     else if (st == OpenThermStatus::RESPONSE_READY)
     {
         status = OpenThermStatus::DELAY;
         responseStatus = (isSlave ? isValidRequest(response) : isValidResponse(response)) ? OpenThermResponseStatus::SUCCESS : OpenThermResponseStatus::INVALID;
-        if (callback) callback(response, responseStatus);
-        return response;
+        processResponse();
     }
     else if (st == OpenThermStatus::DELAY)
     {
@@ -333,12 +332,11 @@ unsigned long OpenTherm::process(std::function<void(unsigned long, OpenThermResp
             status = OpenThermStatus::READY;
         }
     }
-    return 0;
 }
 
 bool OpenTherm::parity(unsigned long frame) // odd parity
 {
-    uint8_t p = 0;
+    byte p = 0;
     while (frame > 0)
     {
         if (frame & 1)
@@ -386,21 +384,21 @@ bool OpenTherm::isValidResponse(unsigned long response)
 {
     if (parity(response))
         return false;
-    uint8_t msgType = (response << 1) >> 29;
-    return msgType == (uint8_t)OpenThermMessageType::READ_ACK || msgType == (uint8_t)OpenThermMessageType::WRITE_ACK;
+    byte msgType = (response << 1) >> 29;
+    return msgType == (byte)OpenThermMessageType::READ_ACK || msgType == (byte)OpenThermMessageType::WRITE_ACK;
 }
 
 bool OpenTherm::isValidRequest(unsigned long request)
 {
     if (parity(request))
         return false;
-    uint8_t msgType = (request << 1) >> 29;
-    return msgType == (uint8_t)OpenThermMessageType::READ_DATA || msgType == (uint8_t)OpenThermMessageType::WRITE_DATA;
+    byte msgType = (request << 1) >> 29;
+    return msgType == (byte)OpenThermMessageType::READ_DATA || msgType == (byte)OpenThermMessageType::WRITE_DATA;
 }
 
 void OpenTherm::end()
 {
-    gpio_isr_handler_remove(inPin);
+    detachInterrupt(digitalPinToInterrupt(inPin));
 }
 
 OpenTherm::~OpenTherm()
@@ -578,5 +576,3 @@ unsigned char OpenTherm::getFault()
 {
     return ((sendRequest(buildRequest(OpenThermRequestType::READ, OpenThermMessageID::ASFflags, 0)) >> 8) & 0xff);
 }
-
-} // namespace ot
