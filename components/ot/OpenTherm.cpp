@@ -302,7 +302,7 @@ void OpenTherm::monitorInterrupts()
 
         // Log outside critical section (ESP_LOGI requires locks)
         if (parsedFrame != 0) {
-            logU32Bin(parsedFrame);
+            //logU32Bin(parsedFrame);
         }
 
         // Update response and status (with interrupt protection for thread safety)
@@ -312,7 +312,7 @@ void OpenTherm::monitorInterrupts()
             responseTimestamp = esp_timer_get_time();
 
             // Validate based on mode: slave expects requests, master expects responses
-            bool valid = isSlave ? isValidRequest(parsedFrame) : isValidResponse(parsedFrame);
+            bool valid = isSlave ? isValidRequest(parsedFrame, isSlave) : isValidResponse(parsedFrame, isSlave);
             responseStatus = valid ? OpenThermResponseStatus::SUCCESS : OpenThermResponseStatus::INVALID;
             status = OpenThermStatus::RESPONSE_READY;
         } else if (status == OpenThermStatus::RESPONSE_WAITING) {
@@ -352,7 +352,7 @@ unsigned long OpenTherm::process(std::function<void(unsigned long, OpenThermResp
     else if (st == OpenThermStatus::RESPONSE_READY)
     {
         status = OpenThermStatus::DELAY;
-        responseStatus = (isSlave ? isValidRequest(response) : isValidResponse(response)) ? OpenThermResponseStatus::SUCCESS : OpenThermResponseStatus::INVALID;
+        responseStatus = (isSlave ? isValidRequest(response, isSlave) : isValidResponse(response, isSlave)) ? OpenThermResponseStatus::SUCCESS : OpenThermResponseStatus::INVALID;
         if (callback) callback(response, responseStatus);
         return response;
     }
@@ -412,20 +412,33 @@ unsigned long OpenTherm::buildResponse(OpenThermMessageType type, OpenThermMessa
     return response;
 }
 
-bool OpenTherm::isValidResponse(unsigned long response)
+bool OpenTherm::isValidResponse(unsigned long response, bool isSlave)
 {
-    if (parity(response))
+    if (parity(response)) {
+        ESP_LOGW("OT", "%s Invalid response (parity): %lu", isSlave ? "T" : "B", response);
         return false;
+    }
+    
     uint8_t msgType = (response << 1) >> 29;
-    return msgType == (uint8_t)OpenThermMessageType::READ_ACK || msgType == (uint8_t)OpenThermMessageType::WRITE_ACK;
+    bool valid = msgType == (uint8_t)OpenThermMessageType::READ_ACK || msgType == (uint8_t)OpenThermMessageType::WRITE_ACK;
+    if (!valid) {
+        ESP_LOGW("OT", "%s Invalid response (type): %lu", isSlave ? "T" : "B", response);
+    }
+    return valid;
 }
 
-bool OpenTherm::isValidRequest(unsigned long request)
+bool OpenTherm::isValidRequest(unsigned long request, bool isSlave)
 {
-    if (parity(request))
+    if (parity(request)) {
+        ESP_LOGW("OT", "%s Invalid request (parity): %lu", isSlave ? "T" : "B", request);
         return false;
+    }
     uint8_t msgType = (request << 1) >> 29;
-    return msgType == (uint8_t)OpenThermMessageType::READ_DATA || msgType == (uint8_t)OpenThermMessageType::WRITE_DATA;
+    bool valid = msgType == (uint8_t)OpenThermMessageType::READ_DATA || msgType == (uint8_t)OpenThermMessageType::WRITE_DATA;
+    if (!valid) {
+        ESP_LOGW("OT", "%s Invalid request (type): %lu", isSlave ? "T" : "B", request);
+    }
+    return valid;
 }
 
 void OpenTherm::end()
@@ -568,44 +581,44 @@ unsigned long OpenTherm::setBoilerStatus(bool enableCentralHeating, bool enableH
 bool OpenTherm::setBoilerTemperature(float temperature)
 {
     unsigned long response = sendRequest(buildSetBoilerTemperatureRequest(temperature));
-    return isValidResponse(response);
+    return isValidResponse(response, isSlave);
 }
 
 float OpenTherm::getBoilerTemperature()
 {
     unsigned long response = sendRequest(buildGetBoilerTemperatureRequest());
-    return isValidResponse(response) ? getFloat(response) : 0;
+    return isValidResponse(response, isSlave) ? getFloat(response) : 0;
 }
 
 float OpenTherm::getReturnTemperature()
 {
     unsigned long response = sendRequest(buildRequest(OpenThermRequestType::READ, OpenThermMessageID::Tret, 0));
-    return isValidResponse(response) ? getFloat(response) : 0;
+    return isValidResponse(response, isSlave) ? getFloat(response) : 0;
 }
 
 bool OpenTherm::setDHWSetpoint(float temperature)
 {
     unsigned int data = temperatureToData(temperature);
     unsigned long response = sendRequest(buildRequest(OpenThermMessageType::WRITE_DATA, OpenThermMessageID::TdhwSet, data));
-    return isValidResponse(response);
+    return isValidResponse(response, isSlave);
 }
 
 float OpenTherm::getDHWTemperature()
 {
     unsigned long response = sendRequest(buildRequest(OpenThermMessageType::READ_DATA, OpenThermMessageID::Tdhw, 0));
-    return isValidResponse(response) ? getFloat(response) : 0;
+    return isValidResponse(response, isSlave) ? getFloat(response) : 0;
 }
 
 float OpenTherm::getModulation()
 {
     unsigned long response = sendRequest(buildRequest(OpenThermRequestType::READ, OpenThermMessageID::RelModLevel, 0));
-    return isValidResponse(response) ? getFloat(response) : 0;
+    return isValidResponse(response, isSlave) ? getFloat(response) : 0;
 }
 
 float OpenTherm::getPressure()
 {
     unsigned long response = sendRequest(buildRequest(OpenThermRequestType::READ, OpenThermMessageID::CHPressure, 0));
-    return isValidResponse(response) ? getFloat(response) : 0;
+    return isValidResponse(response, isSlave) ? getFloat(response) : 0;
 }
 
 unsigned char OpenTherm::getFault()
@@ -645,7 +658,7 @@ uint32_t OpenTherm::parseInterrupts(uint32_t interrupts[128], int upToIndex)
                                "%s%c%lu", (i > 0 ? "," : ""), (level ? 'H' : 'L'), (unsigned long)dur);
         if (written > 0) logPos += written;
     }
-    ESP_LOGI("OT", "%s IRQ[%d]: %s", isSlave ? "T" : "B", upToIndex, logBuf);
+    // ESP_LOGI("OT", "%s IRQ[%d]: %s", isSlave ? "T" : "B", upToIndex, logBuf);
 
     // Manchester half-bit is ~500us (bit is ~1000us).
     constexpr int HALF_US_NOM = 500;
@@ -746,7 +759,8 @@ uint32_t OpenTherm::parseInterrupts(uint32_t interrupts[128], int upToIndex)
             if (dur >= ONE_MIN && dur < ONE_MAX) halves = 1;
             else if (dur >= TWO_MIN && dur <= TWO_MAX) halves = 2;
             else {
-                ESP_LOGI("OT", "%s Invalid duration: %lu for index %d", isSlave ? "T" : "B", (unsigned long)dur, i);
+                ESP_LOGW("OT", "%s Invalid duration: %lu for index %d FRAME: %s", 
+                    isSlave ? "T" : "B", (unsigned long)dur, i, logBuf);
                 return 0;
             }
             for (int k = 0; k < halves && halfCount < 68; ++k) {
@@ -771,7 +785,8 @@ uint32_t OpenTherm::parseInterrupts(uint32_t interrupts[128], int upToIndex)
         else {
             // Allow a final trailing idle to be long; stop if we already have enough
             // or treat as invalid if it appears mid-frame.
-            ESP_LOGI("OT", "%s Invalid duration: %lu for index %d", isSlave ? "T" : "B", (unsigned long)dur, i);
+            ESP_LOGW("OT", "%s Invalid duration: %lu for index %d FRAME: %s",
+                 isSlave ? "T" : "B", (unsigned long)dur, i, logBuf);
             return 0;
         }
 
@@ -788,7 +803,7 @@ uint32_t OpenTherm::parseInterrupts(uint32_t interrupts[128], int upToIndex)
     }
 
     if (halfCount != 68) {
-        ESP_LOGI("OT", "%s Half count mismatch: %d", isSlave ? "T" : "B", halfCount);
+        ESP_LOGW("OT", "%s Half count mismatch: %d FRAME: %s", isSlave ? "T" : "B", halfCount, logBuf);
         return 0;
     }
 
@@ -802,25 +817,25 @@ uint32_t OpenTherm::parseInterrupts(uint32_t interrupts[128], int upToIndex)
         const bool a = halfLevels[2 * b];
         const bool c = halfLevels[2 * b + 1];
         if (a == c) {
-            ESP_LOGI("OT", "%s Invalid Manchester (two same bits): %d", isSlave ? "T" : "B", b);
+            ESP_LOGW("OT", "%s Invalid Manchester (two same bits): %d FRAME: %s", isSlave ? "T" : "B", b, logBuf);
             return 0;
         }
 
         if (a == 1 && c == 0) bits[b] = 1;
         else if (a == 0 && c == 1) bits[b] = 0;
         else {
-            ESP_LOGI("OT", "%s Invalid Manchester (no mid-bit transition): %d", isSlave ? "T" : "B", b);
+            ESP_LOGW("OT", "%s Invalid Manchester (no mid-bit transition): %d FRAME: %s", isSlave ? "T" : "B", b, logBuf);
             return 0;
         }
     }
 
     // Start/stop bits must be '1' (outside the 32-bit frame). :contentReference[oaicite:3]{index=3}
     if (bits[0] != 1) {
-        ESP_LOGI("OT", "%s Invalid start bit: %d", isSlave ? "T" : "B", bits[0]);
+        ESP_LOGW("OT", "%s Invalid start bit: %d FRAME: %s", isSlave ? "T" : "B", bits[0], logBuf);
         return 0;
     }
     if (bits[33] != 1) {
-        ESP_LOGI("OT", "%s Invalid stop bit: %d", isSlave ? "T" : "B", bits[33]);
+        ESP_LOGW("OT", "%s Invalid stop bit: %d FRAME: %s", isSlave ? "T" : "B", bits[33], logBuf);
         return 0;
     }
 
@@ -832,7 +847,7 @@ uint32_t OpenTherm::parseInterrupts(uint32_t interrupts[128], int upToIndex)
 
     // Parity: total number of '1' bits in entire 32 bits must be even. :contentReference[oaicite:4]{index=4}
     if ((popcount32(frame) & 1) != 0) {
-        ESP_LOGI("OT", "%s Invalid parity: %d", isSlave ? "T" : "B", popcount32(frame));
+        ESP_LOGW("OT", "%s Invalid parity: %d FRAME: %s", isSlave ? "T" : "B", popcount32(frame), logBuf);
         return 0;
     }
 
@@ -846,7 +861,7 @@ void OpenTherm::logU32Bin(uint32_t v)
         buf[31 - i] = (v & (1u << i)) ? '1' : '0';
     }
     buf[32] = '\0';
-    ESP_LOGI("OT", "Incoming frame from %s: %s", isSlave ? "T" : "B", buf);
+    //ESP_LOGI("OT", "Incoming frame from %s: %s", isSlave ? "T" : "B", buf);
 }
 
 } // namespace ot

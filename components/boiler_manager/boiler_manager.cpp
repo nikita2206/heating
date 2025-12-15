@@ -395,6 +395,11 @@ private:
                 }
                 logMessage("REQUEST", MessageSource::ThermostatBoiler, reqFrame);
 
+                if (loopCount % 15 == 0) {
+                    request = boiler_->buildSetBoilerStatusRequest(true, true, false, false, false);
+                    ESP_LOGI(TAG, "Swapping boiler request to Status frame: 0x%08lX", request);
+                }
+
                 auto boilerResponse = boiler_->sendRequest(request);
                 int64_t t1 = esp_timer_get_time();
 
@@ -405,17 +410,7 @@ private:
 
                 Frame respFrame(boilerResponse);
 
-                // Log Status frame (ID=0) response details
-                if (dataId == 0) {
-                    uint8_t slaveFlags = respFrame.lowByte();
-                    ESP_LOGI(TAG, "Status RESP: Fault=%d CH=%d DHW=%d Flame=%d Cool=%d CH2=%d Diag=%d (took %lld ms)",
-                             (slaveFlags >> 0) & 1, (slaveFlags >> 1) & 1,
-                             (slaveFlags >> 2) & 1, (slaveFlags >> 3) & 1,
-                             (slaveFlags >> 4) & 1, (slaveFlags >> 5) & 1,
-                             (slaveFlags >> 6) & 1, (t1 - t0) / 1000);
-                } else {
-                    ESP_LOGI(TAG, "Boiler response: 0x%08lX (took %lld ms)", boilerResponse, (t1 - t0) / 1000);
-                }
+                ESP_LOGI(TAG, "Boiler response: 0x%08lX (took %lld ms)", boilerResponse, (t1 - t0) / 1000);
 
                 logMessage("RESPONSE", MessageSource::ThermostatBoiler, respFrame);
                 bool sent = thermostat_->sendResponse(boilerResponse);

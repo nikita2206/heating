@@ -201,8 +201,8 @@ public:
     static OpenThermMessageType getMessageType(unsigned long message);
     static OpenThermMessageID getDataID(unsigned long frame);
     static const char *messageTypeToString(OpenThermMessageType message_type);
-    static bool isValidRequest(unsigned long request);
-    static bool isValidResponse(unsigned long response);
+    static bool isValidRequest(unsigned long request, bool isSlave);
+    static bool isValidResponse(unsigned long response, bool isSlave);
 
     // requests
     static unsigned long buildSetBoilerStatusRequest(bool enableCentralHeating, bool enableHotWater = false, bool enableCooling = false, bool enableOutsideTemperatureCompensation = false, bool enableCentralHeating2 = false);
