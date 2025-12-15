@@ -354,7 +354,7 @@ constexpr char logs_styles_formatted[] = R"(
     }
 )";
 
-constexpr char logs_body_formatted[] = R"(
+constexpr char logs_body_formatted[] = R"JS(
     <div class='container'>
         <h1>Live Logs</h1>
         <p class='subtitle'>Real-time OpenTherm message monitor</p>
@@ -425,17 +425,190 @@ constexpr char logs_body_formatted[] = R"(
             return true;
         }
 
+        // OpenTherm decoding functions (similar to humanize_serial_log.py)
+        const MASTER_MSG_TYPES = {
+            0b000: "READ-DATA",
+            0b001: "WRITE-DATA",
+            0b010: "INVALID-DATA",
+            0b011: "RESERVED",
+            0b100: "RESERVED",
+            0b101: "RESERVED",
+            0b110: "RESERVED",
+            0b111: "RESERVED"
+        };
+
+        const SLAVE_MSG_TYPES = {
+            0b000: "RESERVED",
+            0b001: "RESERVED",
+            0b010: "RESERVED",
+            0b011: "RESERVED",
+            0b100: "READ-ACK",
+            0b101: "WRITE-ACK",
+            0b110: "DATA-INVALID",
+            0b111: "UNKNOWN-DATAID"
+        };
+
+        function u16_to_s16(v) {
+            return (v & 0x8000) ? v - 0x10000 : v;
+        }
+
+        function f8_8_to_float(u16) {
+            return u16_to_s16(u16) / 256.0;
+        }
+
+        function fmt_hex(v, width) {
+            return "0x" + v.toString(16).toUpperCase().padStart(width, '0');
+        }
+
+        function parity_ok(frame_bits) {
+            let count = 0;
+            for (let bit of frame_bits) {
+                if (bit === '1') count++;
+            }
+            return (count % 2) === 0;
+        }
+
+        function decode_status_id0(data_u16) {
+            let hb = (data_u16 >> 8) & 0xFF;  // Master status (HB)
+            let lb = data_u16 & 0xFF;         // Slave status (LB)
+
+            function pretty_master(bit, val) {
+                let on = (val >> bit) & 1;
+                if (bit === 0) return "CH=" + (on ? "enabled" : "disabled");
+                if (bit === 1) return "DHW=" + (on ? "enabled" : "disabled");
+                if (bit === 2) return "Cooling=" + (on ? "enabled" : "disabled");
+                if (bit === 3) return "OTC=" + (on ? "active" : "inactive");
+                if (bit === 4) return "CH2=" + (on ? "enabled" : "disabled");
+                if (bit === 5) return "Mode=" + (on ? "summer" : "winter");
+                if (bit === 6) return "DHWBlocking=" + (on ? "blocked" : "unblocked");
+                if (bit === 7) return "reserved";
+                return "bit" + bit + "=" + on;
+            }
+
+            function pretty_slave(bit, val) {
+                let on = (val >> bit) & 1;
+                if (bit === 0) return "Fault=" + (on ? "yes" : "no");
+                if (bit === 1) return "CHMode=" + (on ? "active" : "inactive");
+                if (bit === 2) return "DHWMode=" + (on ? "active" : "inactive");
+                if (bit === 3) return "Flame=" + (on ? "on" : "off");
+                if (bit === 4) return "CoolingMode=" + (on ? "active" : "inactive");
+                if (bit === 5) return "CH2Mode=" + (on ? "active" : "inactive");
+                if (bit === 6) return "Diagnostic=" + (on ? "event" : "none");
+                if (bit === 7) return "ElectricityProduction=" + (on ? "on" : "off");
+                return "bit" + bit + "=" + on;
+            }
+
+            let master_desc = [];
+            for (let b = 0; b < 8; b++) master_desc.push(pretty_master(b, hb));
+            let slave_desc = [];
+            for (let b = 0; b < 8; b++) slave_desc.push(pretty_slave(b, lb));
+
+            return "MasterStatus(HB): " + master_desc.join("; ") + " | SlaveStatus(LB): " + slave_desc.join("; ");
+        }
+
+        function decode_id1_control_setpoint(data_u16) {
+            let t = f8_8_to_float(data_u16);
+            return "Control Setpoint (Tset) = " + t.toFixed(2) + " °C (raw=" + fmt_hex(data_u16, 4) + ")";
+        }
+
+        function decode_id2_master_config(data_u16) {
+            let hb = (data_u16 >> 8) & 0xFF;
+            let lb = data_u16 & 0xFF;
+            let smart_power = (hb & 0x01) ? "implemented" : "not implemented";
+            return "Master Config: SmartPower=" + smart_power + ", MemberID=" + lb + " (raw=" + fmt_hex(data_u16, 4) + ")";
+        }
+
+        function decode_id3_slave_config(data_u16) {
+            let hb = (data_u16 >> 8) & 0xFF;
+            let lb = data_u16 & 0xFF;
+            function b(bit) { return (hb >> bit) & 1; }
+            let dhw_present = b(0) ? "yes" : "no";
+            let control_type = b(1) ? "on/off" : "modulating";
+            let cooling = b(2) ? "supported" : "not supported";
+            let dhw_cfg = b(3) ? "storage tank" : "instantaneous/not specified";
+            let lowoff = b(4) ? "not allowed" : "allowed";
+            let ch2 = b(5) ? "present" : "not present";
+            let waterfill = b(6) ? "not available" : "available/unknown";
+            let heatcool_switch = b(7) ? "by slave" : "by master";
+            return "Slave Config: DHWpresent=" + dhw_present + ", ControlType=" + control_type + ", Cooling=" + cooling +
+                   ", DHWcfg=" + dhw_cfg + ", LowOff&PumpCtrl=" + lowoff + ", CH2=" + ch2 + ", RemoteWaterFill=" + waterfill +
+                   ", HeatCoolSwitch=" + heatcool_switch + ", MemberID=" + lb + " (raw=" + fmt_hex(data_u16, 4) + ")";
+        }
+
+        function decode_f8_8_temp(name, data_u16) {
+            let v = f8_8_to_float(data_u16);
+            return name + " = " + v.toFixed(2) + " °C (raw=" + fmt_hex(data_u16, 4) + ")";
+        }
+
+        const ID_DECODERS = {
+            0: { name: "Status", decode: decode_status_id0 },
+            1: { name: "Control Setpoint", decode: decode_id1_control_setpoint },
+            2: { name: "Master Configuration", decode: decode_id2_master_config },
+            3: { name: "Slave Configuration", decode: decode_id3_slave_config },
+            17: { name: "Relative modulation level", decode: function(u16) {
+                return "Relative modulation = " + f8_8_to_float(u16).toFixed(2) + " % (raw=" + fmt_hex(u16, 4) + ")";
+            }},
+            18: { name: "CH water pressure", decode: function(u16) {
+                return "CH water pressure = " + f8_8_to_float(u16).toFixed(2) + " bar (raw=" + fmt_hex(u16, 4) + ")";
+            }},
+            19: { name: "DHW flow rate", decode: function(u16) {
+                return "DHW flow rate = " + f8_8_to_float(u16).toFixed(2) + " l/min (raw=" + fmt_hex(u16, 4) + ")";
+            }},
+            25: { name: "Boiler water temp", decode: function(u16) { return decode_f8_8_temp("Boiler water temp", u16); } },
+            26: { name: "DHW temp", decode: function(u16) { return decode_f8_8_temp("DHW temp", u16); } },
+            27: { name: "Outside temp", decode: function(u16) { return decode_f8_8_temp("Outside temp", u16); } },
+            28: { name: "Return water temp", decode: function(u16) { return decode_f8_8_temp("Return water temp", u16); } }
+        };
+
+        function decode_frame_from_message(d) {
+            // Convert the message number to 32-bit binary string
+            let frame_bits = d.message.toString(2).padStart(32, '0');
+            let is_master_to_slave = (d.direction === 'request');
+
+            let msg_type = parseInt(frame_bits.substr(1, 3), 2);
+            let spare = parseInt(frame_bits.substr(4, 4), 2);
+            let data_id = d.data_id;
+            let data_val = d.data_value;
+
+            let msg_name = (is_master_to_slave ? MASTER_MSG_TYPES : SLAVE_MSG_TYPES)[msg_type] || "UNKNOWN";
+            let par_ok = parity_ok(frame_bits);
+
+            // Decode payload
+            let decoder = ID_DECODERS[data_id];
+            let payload, id_name;
+            if (decoder) {
+                payload = decoder.decode(data_val);
+                id_name = decoder.name;
+            } else {
+                let hb = (data_val >> 8) & 0xFF;
+                let lb = data_val & 0xFF;
+                payload = "DATA-VALUE=" + fmt_hex(data_val, 4) + " (HB=" + fmt_hex(hb, 2) + ", LB=" + fmt_hex(lb, 2) + ")";
+                id_name = "Unknown/Unimplemented";
+            }
+
+            let warnings = [];
+            if (spare !== 0) {
+                warnings.push("SPARE!=0 (" + fmt_hex(spare, 1) + ")");
+            }
+            if (!par_ok) {
+                warnings.push("PARITY_ERROR");
+            }
+
+            let warn_txt = warnings.length > 0 ? " [" + warnings.join(" | ") + "]" : "";
+            return msg_name + " (msg=0b" + msg_type.toString(2).padStart(3, '0') + ", id=" + data_id + " " + id_name + ") " + payload + warn_txt;
+        }
+
         function appendLogEntry(d) {
             let div = document.createElement('div');
             let ts = new Date().toLocaleTimeString('en-GB', {hour12: false});
             let src = (d.source || 'THERMOSTAT_BOILER').toLowerCase().replace(/_/g, '-');
             let srcLabel = {'thermostat-boiler':'T&#x2194;B', 'gateway-boiler':'G&#x2194;B', 'thermostat-gateway':'T&#x2194;G'}[src] || 'T&#x2194;B';
             div.className = 'log-entry ' + (d.direction || '').toLowerCase() + ' ' + src;
+            let decoded_content = decode_frame_from_message(d);
             div.innerHTML = '<span class="log-time">' + ts + '</span>' +
                 '<span class="log-source ' + src + '">' + srcLabel + '</span>' +
                 '<span class="log-dir ' + (d.direction || '').toLowerCase() + '">' + (d.direction || '') + '</span>' +
-                '<span class="log-content">' + d.msg_type + ' | ID: ' + d.data_id + ' | Value: ' + d.data_value +
-                ' <span class="log-raw">0x' + d.message.toString(16).toUpperCase().padStart(8, '0') + '</span></span>';
+                '<span class="log-content">' + decoded_content + '</span>';
             logs.appendChild(div);
             if (logs.children.length > 500) logs.removeChild(logs.firstChild);
             logs.scrollTop = logs.scrollHeight;
@@ -463,7 +636,7 @@ constexpr char logs_body_formatted[] = R"(
 
         connect();
     </script>
-)";
+)JS";
 
 // ============================================================================
 // DIAGNOSTICS PAGE

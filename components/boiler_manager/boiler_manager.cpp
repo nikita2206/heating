@@ -343,61 +343,40 @@ private:
         uint32_t validFrames = 0;
         uint32_t invalidFrames = 0;
 
+        // Rewrite the loop into a task waiting for notifications from the OpenTherm instances
+        // Rewrite OpenTherm to use notifications, and try to use RMT instead of interrupts
         while (running_.load()) {
             thermostat_->process([this, &loopCount, &validFrames, &invalidFrames](unsigned long request, OpenThermResponseStatus status) {
                 if (status == OpenThermResponseStatus::TIMEOUT) {
                     // Don't log timeouts - they're normal when no data
                     return;
+
+                    validFrames++;
+
+                    if (status != OpenThermResponseStatus::SUCCESS) {
+                        Frame reqFrame(request);
+                        ESP_LOGW(TAG, "Thermostat frame %s: ID=%d type=%s raw=0x%08lX",
+                                OpenTherm::statusToString(status), reqFrame.dataId(),
+                                toString(reqFrame.messageType()), request);
+                        return;
+                    }
+
                 }
 
                 Frame reqFrame(request);
                 uint8_t dataId = reqFrame.dataId();
                 auto msgType = reqFrame.messageType();
 
-                // DEBUG: Log EVERY frame with bit 31 debug info
-                ESP_LOGI(TAG, "Frame: ID=%d type=%s status=%s raw=0x%08lX bit31:[elapsed=%lu state=%d]",
-                         dataId, toString(msgType), OpenTherm::statusToString(status), request,
-                         thermostat_->debugBit31Elapsed, thermostat_->debugBit31State);
-
-                // Log ALL frames including invalid - to debug ID=0 issue
-                if (status == OpenThermResponseStatus::INVALID) {
-                    invalidFrames++;
-                    bool parityOk = !OpenTherm::parity(request);
-                    ESP_LOGW(TAG, "INVALID #%lu: ID=%d type=%s raw=0x%08lX parity=%s",
-                             (unsigned long)invalidFrames, dataId, toString(msgType), request, parityOk ? "OK" : "BAD");
-                    if (dataId == 0) {
-                        ESP_LOGW(TAG, "ID=0 detected but invalid! HB=0x%02X LB=0x%02X",
-                                 reqFrame.highByte(), reqFrame.lowByte());
-                    }
-                    return;
-                }
-
-                validFrames++;
-
-                if (status != OpenThermResponseStatus::SUCCESS) {
-                    ESP_LOGW(TAG, "Thermostat frame %s: ID=%d type=%s raw=0x%08lX",
-                             OpenTherm::statusToString(status), dataId,
-                             toString(msgType), request);
-                    return;
-                }
-
                 int64_t t0 = esp_timer_get_time();
 
-                // Log Status frame (ID=0) details
-                if (dataId == 0) {
-                    uint8_t masterFlags = reqFrame.highByte();
-                    ESP_LOGI(TAG, "Status REQ: CH=%d DHW=%d Cool=%d OTC=%d CH2=%d",
-                             (masterFlags >> 0) & 1, (masterFlags >> 1) & 1,
-                             (masterFlags >> 2) & 1, (masterFlags >> 3) & 1,
-                             (masterFlags >> 4) & 1);
-                } else {
-                    ESP_LOGI(TAG, "Forwarding ID=%d request 0x%08lX to boiler", dataId, request);
-                }
-                logMessage("REQUEST", MessageSource::ThermostatBoiler, reqFrame);
-
-                if (loopCount % 15 == 0) {
+                if (loopCount % 15 == 0 || request == 0 || status == OpenThermResponseStatus::INVALID) {
                     request = boiler_->buildSetBoilerStatusRequest(true, true, false, false, false);
                     ESP_LOGI(TAG, "Swapping boiler request to Status frame: 0x%08lX", request);
+                    logMessage("REQUEST", MessageSource::GatewayBoiler, Frame(request));
+                } else {
+                    Frame reqFrame(request);
+                    ESP_LOGI(TAG, "Forwarding ID=%d request 0x%08lX to boiler", reqFrame.dataId(), request);
+                    logMessage("REQUEST", MessageSource::ThermostatBoiler, reqFrame);
                 }
 
                 auto boilerResponse = boiler_->sendRequest(request);
