@@ -645,7 +645,7 @@ uint32_t OpenTherm::parseInterrupts(uint32_t interrupts[128], int upToIndex)
                                "%s%c%lu", (i > 0 ? "," : ""), (level ? 'H' : 'L'), (unsigned long)dur);
         if (written > 0) logPos += written;
     }
-    ESP_LOGI("OT", "IRQ[%d]: %s", upToIndex, logBuf);
+    ESP_LOGI("OT", "%s IRQ[%d]: %s", isSlave ? "T" : "B", upToIndex, logBuf);
 
     // Manchester half-bit is ~500us (bit is ~1000us).
     constexpr int HALF_US_NOM = 500;
@@ -718,7 +718,7 @@ uint32_t OpenTherm::parseInterrupts(uint32_t interrupts[128], int upToIndex)
         else {
             // Allow a final trailing idle to be long; stop if we already have enough
             // or treat as invalid if it appears mid-frame.
-            ESP_LOGI("OT", "Invalid duration: %lu for index %d", (unsigned long)dur, i);
+            ESP_LOGI("OT", "%s Invalid duration: %lu for index %d", isSlave ? "T" : "B", (unsigned long)dur, i);
             return 0;
         }
 
@@ -735,7 +735,7 @@ uint32_t OpenTherm::parseInterrupts(uint32_t interrupts[128], int upToIndex)
     }
 
     if (halfCount != 68) {
-        ESP_LOGI("OT", "Half count mismatch: %d", halfCount);
+        ESP_LOGI("OT", "%s Half count mismatch: %d", isSlave ? "T" : "B", halfCount);
         return 0;
     }
 
@@ -749,25 +749,25 @@ uint32_t OpenTherm::parseInterrupts(uint32_t interrupts[128], int upToIndex)
         const bool a = halfLevels[2 * b];
         const bool c = halfLevels[2 * b + 1];
         if (a == c) {
-            ESP_LOGI("OT", "Invalid Manchester (two same bits): %d", b);
+            ESP_LOGI("OT", "%s Invalid Manchester (two same bits): %d", isSlave ? "T" : "B", b);
             return 0;
         }
 
         if (a == 1 && c == 0) bits[b] = 1;
         else if (a == 0 && c == 1) bits[b] = 0;
         else {
-            ESP_LOGI("OT", "Invalid Manchester (no mid-bit transition): %d", b);
+            ESP_LOGI("OT", "%s Invalid Manchester (no mid-bit transition): %d", isSlave ? "T" : "B", b);
             return 0;
         }
     }
 
     // Start/stop bits must be '1' (outside the 32-bit frame). :contentReference[oaicite:3]{index=3}
     if (bits[0] != 1) {
-        ESP_LOGI("OT", "Invalid start bit: %d", bits[0]);
+        ESP_LOGI("OT", "%s Invalid start bit: %d", isSlave ? "T" : "B", bits[0]);
         return 0;
     }
     if (bits[33] != 1) {
-        ESP_LOGI("OT", "Invalid stop bit: %d", bits[33]);
+        ESP_LOGI("OT", "%s Invalid stop bit: %d", isSlave ? "T" : "B", bits[33]);
         return 0;
     }
 
@@ -779,7 +779,7 @@ uint32_t OpenTherm::parseInterrupts(uint32_t interrupts[128], int upToIndex)
 
     // Parity: total number of '1' bits in entire 32 bits must be even. :contentReference[oaicite:4]{index=4}
     if ((popcount32(frame) & 1) != 0) {
-        ESP_LOGI("OT", "Invalid parity: %d", popcount32(frame));
+        ESP_LOGI("OT", "%s Invalid parity: %d", isSlave ? "T" : "B", popcount32(frame));
         return 0;
     }
 
