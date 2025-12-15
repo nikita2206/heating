@@ -126,12 +126,12 @@ void OpenTherm::sendBit(bool high)
 
 bool OpenTherm::sendRequestAsync(unsigned long request)
 {
-    portDISABLE_INTERRUPTS();
+    //portDISABLE_INTERRUPTS();
     const bool ready = isReady();
 
     if (!ready)
     {
-        portENABLE_INTERRUPTS();
+        //portENABLE_INTERRUPTS();
         return false;
     }
 
@@ -145,7 +145,7 @@ bool OpenTherm::sendRequestAsync(unsigned long request)
         vTaskSuspendAll();
     }
 
-    portENABLE_INTERRUPTS();
+    //portENABLE_INTERRUPTS();
 
     sendBit(true); // start bit
     for (int i = 31; i >= 0; i--)
@@ -306,7 +306,7 @@ void OpenTherm::monitorInterrupts()
         }
 
         // Update response and status (with interrupt protection for thread safety)
-        portDISABLE_INTERRUPTS();
+        //portDISABLE_INTERRUPTS();
         if (parsedFrame != 0) {
             response = parsedFrame;
             responseTimestamp = esp_timer_get_time();
@@ -320,17 +320,17 @@ void OpenTherm::monitorInterrupts()
             responseTimestamp = esp_timer_get_time();
             status = OpenThermStatus::RESPONSE_INVALID;
         }
-        portENABLE_INTERRUPTS();
+        //portENABLE_INTERRUPTS();
     }
 }
 
 unsigned long OpenTherm::process(std::function<void(unsigned long, OpenThermResponseStatus)> callback)
 {
-    portDISABLE_INTERRUPTS();
+    //portDISABLE_INTERRUPTS();
     OpenThermStatus st = status;
     unsigned long ts = responseTimestamp;
     auto currentInterrupIdx = interruptsUpToIndex;
-    portENABLE_INTERRUPTS();
+    //portENABLE_INTERRUPTS();
 
     if (st == OpenThermStatus::READY)
         return 0;
