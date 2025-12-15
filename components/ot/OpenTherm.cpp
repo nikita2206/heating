@@ -235,118 +235,40 @@ constexpr uint32_t DUR_MASK  = ~STATE_BIT;
 
 void IRAM_ATTR OpenTherm::handleInterrupt()
 {
+    // Edge ISR: current pin level is the *new* level,
+    // duration belongs to the *previous* level
+    const bool prevLevel = !readState();
+    
     interruptCount++;
 
-    // Precise bit tracking for debugging
-    {
-        uint64_t currentTimestamp = esp_timer_get_time();
-        auto delta = static_cast<uint32_t>(currentTimestamp - lastReceptionTimestamp);
+    uint64_t currentTimestamp = esp_timer_get_time();
+    auto delta = static_cast<uint32_t>(currentTimestamp - lastReceptionTimestamp);
 
-        // Edge ISR: current pin level is the *new* level,
-        // duration belongs to the *previous* level
-        const bool prevLevel = !readState();
-        uint32_t saveInterrupt = (prevLevel ? STATE_BIT : 0) | (delta & DUR_MASK);
+    uint32_t saveInterrupt = (prevLevel ? STATE_BIT : 0) | (delta & DUR_MASK);
 
-        // Reset to the start of the frame
-        if (delta > 900000) {
-            interruptsUpToIndex = 0;
-        }
-
-        interruptTimestamps[interruptsUpToIndex] = saveInterrupt;
-        interruptsUpToIndex = (interruptsUpToIndex + 1) % 128;
-
-        lastReceptionTimestamp = currentTimestamp;
-
-        // signal to the monitoring thread
-        if (monitorTaskHandle_ != nullptr) {
-            BaseType_t xHigherPriorityTaskWoken = pdFALSE;
-            vTaskNotifyGiveFromISR(monitorTaskHandle_, &xHigherPriorityTaskWoken);
-            if (xHigherPriorityTaskWoken == pdTRUE) {
-                portYIELD_FROM_ISR();
-            }
-        }
+    // Reset to the start of the frame on long gap (inter-frame idle)
+    // A complete frame is ~34ms, so any gap > 50ms is definitely between frames
+    if (delta > 45000) {
+        interruptsUpToIndex = 0;
     }
 
-    if (isReady())
-    {
-        if (isSlave && readState() == 1)
-        {
-            status = OpenThermStatus::RESPONSE_WAITING;
-        }
-        else
-        {
-            return;
-        }
+    interruptTimestamps[interruptsUpToIndex] = saveInterrupt;
+    interruptsUpToIndex = (interruptsUpToIndex + 1) % 128;
+
+    lastReceptionTimestamp = currentTimestamp;
+
+    // In slave mode, transition to RESPONSE_WAITING when we see activity during READY state
+    if (isReady() && isSlave && prevLevel == 0) {
+        status = OpenThermStatus::RESPONSE_WAITING;
+        responseTimestamp = currentTimestamp;
     }
 
-    unsigned long newTs = esp_timer_get_time();
-    if (status == OpenThermStatus::RESPONSE_WAITING)
-    {
-        // For inverted hardware (idle=0 on GPIO), mid-bit of start bit is falling edge (state=0)
-        // For standard hardware (idle=1 on GPIO), mid-bit of start bit is rising edge (state=1)
-        // Since we've established hardware is inverted (gpio=0 at idle), trigger on state=0
-        if (readState() == 0)
-        {
-            status = OpenThermStatus::RESPONSE_START_BIT;
-            responseTimestamp = newTs;
-        }
-        // Ignore rising edges (start of start bit with inverted hardware)
-    }
-    else if (status == OpenThermStatus::RESPONSE_START_BIT)
-    {
-        // After start bit rising edge (at T=500us into start bit), wait for mid-bit edge of bit 31
-        // The mid-bit edge should come at ~1000us elapsed (T=1500us into frame)
-        // For parity=1: mid-bit is rising edge (state=1)
-        // For parity=0: mid-bit is falling edge (state=0)
-        // Note: for parity=1, there's a boundary falling edge at ~500us elapsed - ignore it
-        unsigned long elapsed = newTs - responseTimestamp;
-
-        if (elapsed < 600)
-        {
-            // Edge too soon - this is a boundary edge (parity=1 case), not mid-bit
-            // Ignore and keep waiting for the mid-bit edge
-        }
-        else if (elapsed < 1500)
-        {
-            // Mid-bit edge for bit 31 (parity bit)
-            int state = readState();
-            // Debug: capture timing and state for bit 31
-            debugBit31Elapsed = elapsed;
-            debugBit31State = state;
-            status = OpenThermStatus::RESPONSE_RECEIVING;
-            responseTimestamp = newTs;
-            responseBitIndex = 1;  // Bit 31 sampled, next is bit 30
-            response = state ? 0 : 1;  // Inverted: state=0 means bit=1
-        }
-        else // elapsed >= 1500
-        {
-            status = OpenThermStatus::RESPONSE_INVALID;
-            responseTimestamp = newTs;
-        }
-    }
-    else if (status == OpenThermStatus::RESPONSE_RECEIVING)
-    {
-        // Threshold lowered from 750 to 600 to handle timing jitter
-        // Mid-bit edges are ~1000us apart, boundary edges (if any) are at ~500us
-        // 600us safely distinguishes between them while allowing some jitter
-        if ((newTs - responseTimestamp) > 600)
-        {
-            if (responseBitIndex < 32)
-            {
-                int state = readState();
-                // Inverted hardware: state=0 means bit=1
-                int bit = !state;
-                response = (response << 1) | bit;
-                responseTimestamp = newTs;
-                responseBitIndex = responseBitIndex + 1;
-            }
-            else
-            { // stop bit
-                status = OpenThermStatus::RESPONSE_READY;
-                responseTimestamp = newTs;
-                // Debug: store last raw frame for logging
-                lastRawFrame = response;
-            }
+    // Signal to the monitoring task (frame parsing happens there)
+    if (monitorTaskHandle_ != nullptr) {
+        BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+        vTaskNotifyGiveFromISR(monitorTaskHandle_, &xHigherPriorityTaskWoken);
+        if (xHigherPriorityTaskWoken == pdTRUE) {
+            portYIELD_FROM_ISR();
         }
     }
 }
@@ -358,21 +280,47 @@ void IRAM_ATTR OpenTherm::handleInterruptHelper(void* ptr)
 
 void OpenTherm::monitorInterrupts()
 {
-    // Wait for ESP notifications to this thread
+    // Frame parsing task - waits for interrupts, then parses complete frames
     while (true) {
+        // Wait for first interrupt (start of potential frame)
         ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
 
+        // Wait for frame to complete - keep consuming notifications until
+        // no more arrive for 5ms (indicates end of frame, since bits are ~1ms each)
+        while (ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(5)) > 0) {
+            // Keep consuming notifications until timeout
+        }
+
         int currentIndex = interruptsUpToIndex;
-        if (currentIndex < 40) {
+        if (currentIndex < 35) {
             // Not enough interrupts for a complete frame, skip parsing
+            // (minimum is ~35 for alternating bit patterns, typical is 50-65)
             continue;
         }
 
         auto parsedFrame = parseInterrupts(interruptTimestamps, currentIndex);
+
+        // Log outside critical section (ESP_LOGI requires locks)
         if (parsedFrame != 0) {
-            // Print as binary string (e.g. 01010101)
             logU32Bin(parsedFrame);
         }
+
+        // Update response and status (with interrupt protection for thread safety)
+        portDISABLE_INTERRUPTS();
+        if (parsedFrame != 0) {
+            response = parsedFrame;
+            responseTimestamp = esp_timer_get_time();
+
+            // Validate based on mode: slave expects requests, master expects responses
+            bool valid = isSlave ? isValidRequest(parsedFrame) : isValidResponse(parsedFrame);
+            responseStatus = valid ? OpenThermResponseStatus::SUCCESS : OpenThermResponseStatus::INVALID;
+            status = OpenThermStatus::RESPONSE_READY;
+        } else if (status == OpenThermStatus::RESPONSE_WAITING) {
+            // Frame parsing failed while we were expecting a response - mark as invalid
+            responseTimestamp = esp_timer_get_time();
+            status = OpenThermStatus::RESPONSE_INVALID;
+        }
+        portENABLE_INTERRUPTS();
     }
 }
 
@@ -405,8 +353,7 @@ unsigned long OpenTherm::process(std::function<void(unsigned long, OpenThermResp
     {
         status = OpenThermStatus::DELAY;
         responseStatus = (isSlave ? isValidRequest(response) : isValidResponse(response)) ? OpenThermResponseStatus::SUCCESS : OpenThermResponseStatus::INVALID;
-        // commenting to break it
-        //if (callback) callback(response, responseStatus);
+        if (callback) callback(response, responseStatus);
         return response;
     }
     else if (st == OpenThermStatus::DELAY)
@@ -713,11 +660,50 @@ uint32_t OpenTherm::parseInterrupts(uint32_t interrupts[128], int upToIndex)
     bool halfLevels[68];
     int halfCount = 0;
 
+    // Glitch filter threshold - pulses shorter than this are noise
+    constexpr int GLITCH_MAX_US = 200;
+
+    // Check if start bit first half merged with idle.
+    // When idle is HIGH and start bit first half is also HIGH, they merge.
+    // We detect this when: idle (index 0) is HIGH, and first data entry is LOW.
+    // In this case, prepend an implicit HIGH half-bit for the start bit first half.
+    if (upToIndex > 1 && seg_level(interrupts[0]) && !seg_level(interrupts[1])) {
+        halfLevels[halfCount++] = 1;  // Implicit start bit first half (HIGH)
+    }
+
     // Expect first entry to be the long idle period before the start bit
     // We'll just skip index 0 unconditionally.
     for (int i = 1; i < upToIndex && halfCount < 68; i++) {
         bool level = seg_level(interrupts[i]);
         uint32_t dur = seg_dur_us(interrupts[i]);
+
+        // Handle very short glitch pulses (e.g., H76 between L938 and L516)
+        // These can be noise, or squished transitions that need restoration
+        if (dur < GLITCH_MAX_US) {
+            // Check if restoring this glitch would prevent a Manchester error
+            // If prev half and next segment are same level, and this glitch is opposite,
+            // restore it as 1 half-bit to maintain valid Manchester encoding
+            if (halfCount > 0 && i + 1 < upToIndex) {
+                bool prevHalfLevel = halfLevels[halfCount - 1];
+                bool nextLevel = seg_level(interrupts[i + 1]);
+                uint32_t nextDur = seg_dur_us(interrupts[i + 1]);
+
+                if (prevHalfLevel == nextLevel && nextDur >= ONE_MIN && level != prevHalfLevel) {
+                    // Check if previous segment was "stretched" (borderline 2-half that should be 1-half)
+                    // This happens when a glitch squishes: the time gets redistributed to neighbors
+                    // Pattern: L938,H76,L516 -> should be 3 half-bits (L,H,L), not 4 (L,L,H,L)
+                    if (i > 1) {
+                        uint32_t prevSegDur = seg_dur_us(interrupts[i - 1]);
+                        // If prev segment was stretched (e.g., L938 counted as 2 halves), remove one half
+                        if (prevSegDur >= 700 && prevSegDur <= 1100 && halfCount >= 2 && halfLevels[halfCount - 2] == prevHalfLevel) {
+                            halfCount--;  // Remove one of the stretched segment's halves
+                        }
+                    }
+                    halfLevels[halfCount++] = level;  // Restore glitch as 1 half-bit
+                }
+            }
+            continue;
+        }
 
         // Merge consecutive entries with the same level (caused by ISR timing glitches).
         // E.g., L506,L5,H502 -> L511,H502 (the L5 is a spurious edge from noise)
