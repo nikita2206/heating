@@ -710,6 +710,7 @@ uint32_t OpenTherm::parseInterrupts(uint32_t interrupts[68], int upToIndex)
         if (dur >= ONE_MIN && dur < ONE_MAX) halves = 1;
         else if (dur >= TWO_MIN && dur <= TWO_MAX) halves = 2;
         else {
+            ESP_LOGI("OT", "Invalid duration: %d", dur);
             // Allow a final trailing idle to be long; stop if we already have enough
             // or treat as invalid if it appears mid-frame.
             return 0;
@@ -721,7 +722,10 @@ uint32_t OpenTherm::parseInterrupts(uint32_t interrupts[68], int upToIndex)
         ++i;
     }
 
-    if (halfCount != 68) return 0;
+    if (halfCount != 68) {
+        ESP_LOGI("OT", "Half count mismatch: %d", halfCount);
+        return 0;
+    }
 
     // Decode 34 Manchester bits from pairs of half-levels.
     // With your described start: idle low -> high then low indicates first bit=1,
@@ -732,16 +736,28 @@ uint32_t OpenTherm::parseInterrupts(uint32_t interrupts[68], int upToIndex)
     for (int b = 0; b < 34; ++b) {
         const bool a = halfLevels[2 * b];
         const bool c = halfLevels[2 * b + 1];
-        if (a == c) return 0; // invalid Manchester (no mid-bit transition)
+        if (a == c) {
+            ESP_LOGI("OT", "Invalid Manchester (two same bits): %d", b);
+            return 0;
+        }
 
         if (a == 1 && c == 0) bits[b] = 1;
         else if (a == 0 && c == 1) bits[b] = 0;
-        else return 0;
+        else {
+            ESP_LOGI("OT", "Invalid Manchester (no mid-bit transition): %d", b);
+            return 0;
+        }
     }
 
     // Start/stop bits must be '1' (outside the 32-bit frame). :contentReference[oaicite:3]{index=3}
-    if (bits[0] != 1) return 0;
-    if (bits[33] != 1) return 0;
+    if (bits[0] != 1) {
+        ESP_LOGI("OT", "Invalid start bit: %d", bits[0]);
+        return 0;
+    }
+    if (bits[33] != 1) {
+        ESP_LOGI("OT", "Invalid stop bit: %d", bits[33]);
+        return 0;
+    }
 
     // Build the 32-bit frame from bits[1..32], MSB first.
     uint32_t frame = 0;
@@ -750,7 +766,10 @@ uint32_t OpenTherm::parseInterrupts(uint32_t interrupts[68], int upToIndex)
     }
 
     // Parity: total number of '1' bits in entire 32 bits must be even. :contentReference[oaicite:4]{index=4}
-    if ((popcount32(frame) & 1) != 0) return 0;
+    if ((popcount32(frame) & 1) != 0) {
+        ESP_LOGI("OT", "Invalid parity: %d", popcount32(frame));
+        return 0;
+    }
 
     return frame;
 }
