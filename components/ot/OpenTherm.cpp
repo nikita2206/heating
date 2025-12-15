@@ -32,7 +32,8 @@ OpenTherm::OpenTherm(gpio_num_t inPin, gpio_num_t outPin, bool isSlave, bool inv
     invertInput(invertInput),
     response(0),
     responseStatus(OpenThermResponseStatus::NONE),
-    responseTimestamp(0)
+    responseTimestamp(0),
+    monitorTaskHandle_(nullptr)
 {
 }
 
@@ -58,14 +59,7 @@ void OpenTherm::begin()
     };
     gpio_config(&out_conf);
 
-    // Install ISR service if not already installed
-    gpio_install_isr_service(0);
-
-    gpio_isr_handler_add(inPin, OpenTherm::handleInterruptHelper, this);
-    activateBoiler();
-    status = OpenThermStatus::READY;
-
-    // Create monitoring task
+    // Create monitoring task before enabling interrupts
     BaseType_t ret = xTaskCreatePinnedToCore(
         monitorTaskEntry,
         "ot_monitor",
@@ -80,6 +74,13 @@ void OpenTherm::begin()
         ESP_LOGE("OpenTherm", "Failed to create monitor task");
         monitorTaskHandle_ = nullptr;
     }
+
+    // Install ISR service if not already installed
+    gpio_install_isr_service(0);
+
+    gpio_isr_handler_add(inPin, OpenTherm::handleInterruptHelper, this);
+    activateBoiler();
+    status = OpenThermStatus::READY;
 }
 
 bool IRAM_ATTR OpenTherm::isReady()
@@ -246,8 +247,13 @@ void IRAM_ATTR OpenTherm::handleInterrupt()
         const bool prevLevel = !readState();
         uint32_t saveInterrupt = (prevLevel ? STATE_BIT : 0) | (delta & DUR_MASK);
 
+        // Reset to the start of the frame
+        if (delta > 900000) {
+            interruptsUpToIndex = 0;
+        }
+
         interruptTimestamps[interruptsUpToIndex] = saveInterrupt;
-        interruptsUpToIndex = (interruptsUpToIndex + 1) % 68;
+        interruptsUpToIndex = (interruptsUpToIndex + 1) % 128;
 
         lastReceptionTimestamp = currentTimestamp;
 
@@ -352,19 +358,17 @@ void IRAM_ATTR OpenTherm::handleInterruptHelper(void* ptr)
 
 void OpenTherm::monitorInterrupts()
 {
-    uint32_t interruptTimestampsCopy[68];
-
     // Wait for ESP notifications to this thread
     while (true) {
         ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
-        ESP_LOGI("OT", "Scanning interrupts");
 
-        // Fast copy of interrupt timestamps, starting from interruptsUpToIndex
-        for (int i = 0; i < 68; i++) {
-            interruptTimestampsCopy[i] = interruptTimestamps[(i + interruptsUpToIndex) % 68];
+        int currentIndex = interruptsUpToIndex;
+        if (currentIndex < 40) {
+            // Not enough interrupts for a complete frame, skip parsing
+            continue;
         }
 
-        auto parsedFrame = parseInterrupts(interruptTimestampsCopy, 68);
+        auto parsedFrame = parseInterrupts(interruptTimestamps, currentIndex);
         if (parsedFrame != 0) {
             // Print as binary string (e.g. 01010101)
             logU32Bin(parsedFrame);
@@ -680,14 +684,21 @@ static inline int popcount32(uint32_t v) {
 #endif
 }
 
-uint32_t OpenTherm::parseInterrupts(uint32_t interrupts[68], int upToIndex)
+uint32_t OpenTherm::parseInterrupts(uint32_t interrupts[128], int upToIndex)
 {
-    // Need at least: idle + a bunch of segments
-    if (upToIndex < 4) return 0;
-
-    // Expect first entry to be the long idle period before the start bit
-    // We'll just skip index 0 unconditionally.
-    int i = 1;
+    // Log interrupts in compact form: "L:dur,H:dur,..." (L=low, H=high)
+    // Build a compact string showing level and duration for each segment
+    // Each entry can be up to ~10 chars (e.g. ",H900000"), 128 entries max = ~1280 bytes
+    char logBuf[1536];
+    int logPos = 0;
+    for (int i = 0; i < upToIndex && logPos < (int)sizeof(logBuf) - 12; i++) {
+        const bool level = seg_level(interrupts[i]);
+        const uint32_t dur = seg_dur_us(interrupts[i]);
+        int written = snprintf(logBuf + logPos, sizeof(logBuf) - logPos,
+                               "%s%c%lu", (i > 0 ? "," : ""), (level ? 'H' : 'L'), (unsigned long)dur);
+        if (written > 0) logPos += written;
+    }
+    ESP_LOGI("OT", "IRQ[%d]: %s", upToIndex, logBuf);
 
     // Manchester half-bit is ~500us (bit is ~1000us).
     constexpr int HALF_US_NOM = 500;
@@ -698,28 +709,43 @@ uint32_t OpenTherm::parseInterrupts(uint32_t interrupts[68], int upToIndex)
     constexpr int TWO_MIN = 700;
     constexpr int TWO_MAX = 1300;
 
-    // We want start(1) + 32 frame + stop(1) = 34 bits => 69 half-bits.
-    bool halfLevels[69];
+    // We want start(1) + 32 frame + stop(1) = 34 bits => 68 half-bits.
+    bool halfLevels[68];
     int halfCount = 0;
 
-    while (i < upToIndex && halfCount < 69) {
-        const bool level = seg_level(interrupts[i]);
-        const uint32_t dur = seg_dur_us(interrupts[i]);
+    // Expect first entry to be the long idle period before the start bit
+    // We'll just skip index 0 unconditionally.
+    for (int i = 1; i < upToIndex && halfCount < 68; i++) {
+        bool level = seg_level(interrupts[i]);
+        uint32_t dur = seg_dur_us(interrupts[i]);
+
+        // Merge consecutive entries with the same level (caused by ISR timing glitches).
+        // E.g., L506,L5,H502 -> L511,H502 (the L5 is a spurious edge from noise)
+        while (i + 1 < upToIndex && seg_level(interrupts[i + 1]) == level) {
+            i++;
+            dur += seg_dur_us(interrupts[i]);
+        }
 
         int halves = 0;
         if (dur >= ONE_MIN && dur < ONE_MAX) halves = 1;
         else if (dur >= TWO_MIN && dur <= TWO_MAX) halves = 2;
         else {
-            ESP_LOGI("OT", "Invalid duration: %d", dur);
             // Allow a final trailing idle to be long; stop if we already have enough
             // or treat as invalid if it appears mid-frame.
+            ESP_LOGI("OT", "Invalid duration: %lu for index %d", (unsigned long)dur, i);
             return 0;
         }
 
-        for (int k = 0; k < halves && halfCount < 69; ++k) {
+        for (int k = 0; k < halves && halfCount < 68; ++k) {
             halfLevels[halfCount++] = level;
         }
-        ++i;
+    }
+
+    // The last half-bit (stop bit second half, LOW) may not be captured because
+    // the line stays at idle (LOW) with no edge to trigger an interrupt.
+    // If we're exactly 1 short and the last recorded level was HIGH, infer the final LOW half.
+    if (halfCount == 67 && halfLevels[66] == 1) {
+        halfLevels[halfCount++] = 0;  // Infer final LOW half-bit
     }
 
     if (halfCount != 68) {

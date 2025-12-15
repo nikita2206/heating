@@ -175,7 +175,7 @@ public:
     volatile int64_t lastReceptionTimestamp;
     volatile int64_t responseStartsAt;
     volatile bool midBit;
-    uint32_t interruptTimestamps[68];
+    uint32_t interruptTimestamps[128];
     int interruptsUpToIndex = 0;
     void begin();
     bool isReady();
@@ -257,7 +257,7 @@ private:
     void setActiveState();
     void setIdleState();
     void activateBoiler();
-    uint32_t parseInterrupts(uint32_t interrupts[68], int upToIndex);
+    uint32_t parseInterrupts(uint32_t interrupts[128], int upToIndex);
     void logU32Bin(uint32_t v);
 
     TaskHandle_t monitorTaskHandle_;
