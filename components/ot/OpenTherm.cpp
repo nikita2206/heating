@@ -252,13 +252,13 @@ void IRAM_ATTR OpenTherm::handleInterrupt()
         lastReceptionTimestamp = currentTimestamp;
 
         // signal to the monitoring thread
-        if (monitorTaskHandle_ != nullptr) {
-            BaseType_t xHigherPriorityTaskWoken = pdFALSE;
-            vTaskNotifyGiveFromISR(monitorTaskHandle_, &xHigherPriorityTaskWoken);
-            if (xHigherPriorityTaskWoken == pdTRUE) {
-                portYIELD_FROM_ISR();
-            }
-        }
+        // if (monitorTaskHandle_ != nullptr) {
+        //     BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+        //     vTaskNotifyGiveFromISR(monitorTaskHandle_, &xHigherPriorityTaskWoken);
+        //     if (xHigherPriorityTaskWoken == pdTRUE) {
+        //         portYIELD_FROM_ISR();
+        //     }
+        // }
     }
 
     if (isReady())
@@ -356,7 +356,6 @@ void OpenTherm::monitorInterrupts()
 
     // Wait for ESP notifications to this thread
     while (true) {
-        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
         ESP_LOGI("OT", "Scanning interrupts");
 
         // Fast copy of interrupt timestamps, starting from interruptsUpToIndex
@@ -369,6 +368,9 @@ void OpenTherm::monitorInterrupts()
             // Print as binary string (e.g. 01010101)
             logU32Bin(parsedFrame);
         }
+
+        // sleep for 1ms
+        vTaskDelay(pdMS_TO_TICKS(1));
     }
 }
 
