@@ -707,9 +707,62 @@ uint32_t OpenTherm::parseInterrupts(uint32_t interrupts[128], int upToIndex)
 
         // Merge consecutive entries with the same level (caused by ISR timing glitches).
         // E.g., L506,L5,H502 -> L511,H502 (the L5 is a spurious edge from noise)
+        // BUT: check for pattern where a glitch separates same-level segments that shouldn't merge.
+        // E.g., L987,L514,H4,L482 -> the L514 was misread and should be H514 (flip and merge with H4)
         while (i + 1 < upToIndex && seg_level(interrupts[i + 1]) == level) {
+            uint32_t nextDur = seg_dur_us(interrupts[i + 1]);
+
+            // Check for flip pattern: next segment is same level, followed by glitch of opposite level,
+            // followed by segment of same level as current. This suggests the next segment was misread.
+            // Pattern: L987(current), L514(i+1), H4(i+2), L482(i+3)
+            if (nextDur >= ONE_MIN && nextDur <= ONE_MAX &&   // i+1 is ~1 half-bit duration
+                i + 2 < upToIndex &&
+                seg_dur_us(interrupts[i + 2]) < GLITCH_MAX_US &&  // i+2 is a glitch
+                seg_level(interrupts[i + 2]) != level &&          // glitch has opposite level
+                i + 3 < upToIndex &&
+                seg_level(interrupts[i + 3]) == level) {          // i+3 back to original level
+                // Don't merge - stop here and let the flip logic handle it after
+                break;
+            }
+
             i++;
             dur += seg_dur_us(interrupts[i]);
+        }
+
+        // After processing current segment, check if next should be flipped.
+        // Pattern: we just processed L987, now check if L514,H4 at i+1,i+2 should become H518
+        if (i + 2 < upToIndex &&
+            seg_level(interrupts[i + 1]) == level &&              // i+1 same level as current
+            seg_dur_us(interrupts[i + 1]) >= ONE_MIN &&
+            seg_dur_us(interrupts[i + 1]) <= ONE_MAX &&           // i+1 is ~1 half-bit
+            seg_dur_us(interrupts[i + 2]) < GLITCH_MAX_US &&      // i+2 is glitch
+            seg_level(interrupts[i + 2]) != level) {              // glitch is opposite level
+
+            bool glitchLevel = seg_level(interrupts[i + 2]);
+            uint32_t flippedDur = seg_dur_us(interrupts[i + 1]) + seg_dur_us(interrupts[i + 2]);
+
+            // First, add halves for current segment
+            int halves = 0;
+            if (dur >= ONE_MIN && dur < ONE_MAX) halves = 1;
+            else if (dur >= TWO_MIN && dur <= TWO_MAX) halves = 2;
+            else {
+                ESP_LOGI("OT", "%s Invalid duration: %lu for index %d", isSlave ? "T" : "B", (unsigned long)dur, i);
+                return 0;
+            }
+            for (int k = 0; k < halves && halfCount < 68; ++k) {
+                halfLevels[halfCount++] = level;
+            }
+
+            // Now add the flipped segment
+            if (flippedDur >= ONE_MIN && flippedDur < ONE_MAX) {
+                halfLevels[halfCount++] = glitchLevel;
+            } else if (flippedDur >= TWO_MIN && flippedDur <= TWO_MAX) {
+                halfLevels[halfCount++] = glitchLevel;
+                if (halfCount < 68) halfLevels[halfCount++] = glitchLevel;
+            }
+            // Skip both the misread segment and the glitch
+            i += 2;
+            continue;
         }
 
         int halves = 0;

@@ -107,13 +107,69 @@ def decode_opentherm(interrupts):
 
         # Merge consecutive same-level entries (ISR timing glitches)
         # E.g., L506,L5,H502 -> L511,H502
+        # BUT: check for pattern where a glitch separates same-level segments that shouldn't merge.
+        # E.g., L987,L514,H4,L482 -> the L514 was misread and should be H514 (flip and merge with H4)
         orig_i = i
         while i + 1 < len(interrupts) and interrupts[i + 1][0] == level:
+            next_dur = interrupts[i + 1][1]
+
+            # Check for flip pattern: next segment is same level, followed by glitch of opposite level,
+            # followed by segment of same level as current
+            if (ONE_MIN <= next_dur <= ONE_MAX and
+                i + 2 < len(interrupts) and
+                interrupts[i + 2][1] < GLITCH_MAX_US and  # i+2 is a glitch
+                interrupts[i + 2][0] != level and         # glitch has opposite level
+                i + 3 < len(interrupts) and
+                interrupts[i + 3][0] == level):           # i+3 back to original level
+                # Don't merge - stop here and let the flip logic handle it
+                print(f"  [Pattern] Detected flip pattern at idx={i+1}, stopping merge")
+                break
+
             i += 1
             dur += interrupts[i][1]
 
         if i != orig_i:
             print(f"  [Merge] idx={orig_i}-{i} merged to {'H' if level else 'L'}{dur}us")
+
+        # After processing current segment, check if next should be flipped.
+        # Pattern: we just processed L987, now check if L514,H4 at i+1,i+2 should become H518
+        if (i + 2 < len(interrupts) and
+            interrupts[i + 1][0] == level and                    # i+1 same level as current
+            ONE_MIN <= interrupts[i + 1][1] <= ONE_MAX and       # i+1 is ~1 half-bit
+            interrupts[i + 2][1] < GLITCH_MAX_US and             # i+2 is glitch
+            interrupts[i + 2][0] != level):                      # glitch is opposite level
+
+            glitch_level = interrupts[i + 2][0]
+            flipped_dur = interrupts[i + 1][1] + interrupts[i + 2][1]
+
+            # First, add halves for current segment
+            if ONE_MIN <= dur < ONE_MAX:
+                halves = 1
+            elif TWO_MIN <= dur <= TWO_MAX:
+                halves = 2
+            else:
+                print(f"  [ERROR] Invalid duration: {dur}us at index {i}")
+                return None
+
+            for _ in range(halves):
+                if len(half_levels) < 68:
+                    half_levels.append(level)
+
+            print(f"  idx={orig_i}: {'H' if level else 'L'}{dur}us -> {halves} half(s) -> half_count={len(half_levels)}")
+
+            # Now add the flipped segment
+            if ONE_MIN <= flipped_dur < ONE_MAX:
+                half_levels.append(glitch_level)
+                print(f"  [Flip] idx={i+1},{i+2} {'H' if interrupts[i+1][0] else 'L'}{interrupts[i+1][1]}+{'H' if glitch_level else 'L'}{interrupts[i+2][1]} -> {'H' if glitch_level else 'L'}{flipped_dur}us -> 1 half -> half_count={len(half_levels)}")
+            elif TWO_MIN <= flipped_dur <= TWO_MAX:
+                half_levels.append(glitch_level)
+                if len(half_levels) < 68:
+                    half_levels.append(glitch_level)
+                print(f"  [Flip] idx={i+1},{i+2} {'H' if interrupts[i+1][0] else 'L'}{interrupts[i+1][1]}+{'H' if glitch_level else 'L'}{interrupts[i+2][1]} -> {'H' if glitch_level else 'L'}{flipped_dur}us -> 2 halves -> half_count={len(half_levels)}")
+
+            # Skip both the misread segment and the glitch
+            i += 3
+            continue
 
         # Classify duration
         if ONE_MIN <= dur < ONE_MAX:
