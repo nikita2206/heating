@@ -564,7 +564,7 @@ constexpr char logs_body_formatted[] = R"JS(
 
         function decode_frame_from_message(d) {
             let frame_bits = d.message.toString(2).padStart(32, '0');
-            let is_master_to_slave = (d.direction === 'request');
+            let is_master_to_slave = (d.direction === 'REQUEST');
 
             /* OpenTherm frame layout:
                [31] ?, [30:28] MSG_TYPE, [27:24] ?, [23:16] DATA_ID, [15:0] DATA_VALUE */
