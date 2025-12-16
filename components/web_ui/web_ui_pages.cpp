@@ -8,6 +8,8 @@
 
 namespace web_ui {
 
+// Use /* */ comments in JS code always, because // comments are not supported by the minifier
+
 // ============================================================================
 // DASHBOARD PAGE
 // ============================================================================
@@ -425,7 +427,7 @@ constexpr char logs_body_formatted[] = R"JS(
             return true;
         }
 
-        // OpenTherm decoding functions (similar to humanize_serial_log.py)
+
         const MASTER_MSG_TYPES = {
             0: "READ-DATA",
             1: "WRITE-DATA",
@@ -469,8 +471,8 @@ constexpr char logs_body_formatted[] = R"JS(
         }
 
         function decode_status_id0(data_u16) {
-            let hb = (data_u16 >> 8) & 0xFF;  // Master status (HB)
-            let lb = data_u16 & 0xFF;         // Slave status (LB)
+            let hb = (data_u16 >> 8) & 0xFF; 
+            let lb = data_u16 & 0xFF;        
 
             function pretty_master(bit, val) {
                 let on = (val >> bit) & 1;
@@ -561,19 +563,20 @@ constexpr char logs_body_formatted[] = R"JS(
         };
 
         function decode_frame_from_message(d) {
-            // Convert the message number to 32-bit binary string
             let frame_bits = d.message.toString(2).padStart(32, '0');
             let is_master_to_slave = (d.direction === 'request');
 
-            let msg_type = parseInt(frame_bits.substr(1, 3), 2);
-            let spare = parseInt(frame_bits.substr(4, 4), 2);
-            let data_id = d.data_id;
-            let data_val = d.data_value;
+            /* OpenTherm frame layout:
+               [31] ?, [30:28] MSG_TYPE, [27:24] ?, [23:16] DATA_ID, [15:0] DATA_VALUE */
+            let msg_type = parseInt(frame_bits.substr(3, 3), 2);  /* bits 28-30 */
+            let data_id = parseInt(frame_bits.substr(8, 8), 2);   /* bits 16-23 */
+            let data_val = parseInt(frame_bits.substr(16, 16), 2); /* bits 0-15 */
+
 
             let msg_name = (is_master_to_slave ? MASTER_MSG_TYPES : SLAVE_MSG_TYPES)[msg_type] || "UNKNOWN";
             let par_ok = parity_ok(frame_bits);
 
-            // Decode payload
+            /* Decode payload */
             let decoder = ID_DECODERS[data_id];
             let payload, id_name;
             if (decoder) {
@@ -587,15 +590,12 @@ constexpr char logs_body_formatted[] = R"JS(
             }
 
             let warnings = [];
-            if (spare !== 0) {
-                warnings.push("SPARE!=0 (" + fmt_hex(spare, 1) + ")");
-            }
             if (!par_ok) {
                 warnings.push("PARITY_ERROR");
             }
 
             let warn_txt = warnings.length > 0 ? " [" + warnings.join(" | ") + "]" : "";
-            return msg_name + " (msg=0b" + msg_type.toString(2).padStart(3, '0') + ", id=" + data_id + " " + id_name + ") " + payload + warn_txt;
+            return msg_name + " (msg=" + msg_type + ", id=" + data_id + " " + id_name + ") " + payload + warn_txt;
         }
 
         function appendLogEntry(d) {
@@ -634,7 +634,7 @@ constexpr char logs_body_formatted[] = R"JS(
             document.getElementById('msg-count').textContent = '0';
         }
 
-        // Wait for DOM to be ready
+        /* Wait for DOM to be ready */
         function init() {
             try {
                 logs = document.getElementById('logs');
