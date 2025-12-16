@@ -20,8 +20,10 @@ P MGS-TYPE SPARE DATA-ID  DATA-VALUE
 #include "driver/rmt_types.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/queue.h"
 
 namespace ot {
+
 
 enum class OpenThermResponseStatus : uint8_t
 {
@@ -167,11 +169,15 @@ enum class OpenThermStatus : uint8_t
     RESPONSE_INVALID
 };
 
+// Forward declaration for friend function
+bool on_rmt_rx_done(rmt_channel_handle_t rx_chan, const rmt_rx_done_event_data_t *edata, void *user_ctx);
+
 class OpenTherm
 {
 public:
     friend void monitorTaskEntry(void* pvParameters);
-    OpenTherm(gpio_num_t inPin = GPIO_NUM_4, gpio_num_t outPin = GPIO_NUM_5, bool isSlave = false, bool invertOutput = false, bool invertInput = false);
+    friend bool on_rmt_rx_done(rmt_channel_handle_t rx_chan, const rmt_rx_done_event_data_t *edata, void *user_ctx);
+    OpenTherm(gpio_num_t inPin = GPIO_NUM_4, gpio_num_t outPin = GPIO_NUM_5, bool isSlave = false, bool invertOutput = false);
     ~OpenTherm();
     volatile OpenThermStatus status;
     volatile int64_t lastReceptionTimestamp;
@@ -235,14 +241,20 @@ public:
 
 
     void monitorInterrupts();
-    bool handleRMTFrame(const rmt_rx_done_event_data_t *edata);
 
 private:
+    void monitorGPIOInterrupts();
+    void monitorRMT();
+
+    // RMT methods
+    void initRMT();
+    void startRMTReceive();
+    void stopRMTReceive();
+    uint32_t parseRMTSymbols(rmt_symbol_word_t* symbols, size_t num_symbols);
     const gpio_num_t inPin;
     const gpio_num_t outPin;
     const bool isSlave;
     const bool invertOutput;
-    const bool invertInput;
 
     volatile unsigned long response;
     volatile OpenThermResponseStatus responseStatus;
@@ -269,14 +281,13 @@ private:
     rmt_channel_handle_t rmtChannel_;
     bool useRMT_;  // Flag to switch between interrupt and RMT mode
 
-    void sendBit(bool high);
+    // Double buffering for RMT: one buffer for hardware, one for processing
+    rmt_symbol_word_t rmtRxBuffers_[2][128];
+    volatile uint8_t rmtActiveBuffer_;    // Which buffer RMT is writing to (0 or 1)
+    volatile size_t rmtFrameSize_;        // Number of symbols received (set by ISR)
+    volatile bool rmtFrameReady_;         // Flag to indicate frame ready for processing
 
-    // RMT methods
-    void initRMT();
-    void startRMTReceive();
-    void stopRMTReceive();
-    void monitorGPIOInterrupts();
-    uint32_t parseRMTSymbols(rmt_symbol_word_t* symbols, size_t num_symbols);
+    void sendBit(bool high);
 };
 
 enum class MessageType : uint8_t {

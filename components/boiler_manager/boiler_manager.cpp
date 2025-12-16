@@ -97,14 +97,14 @@ public:
         // Create OpenTherm instances with configured pins
         thermostat_ = std::make_unique<OpenTherm>(
             config_.thermostatInPin, config_.thermostatOutPin, true,
-            config_.thermostatInvertOutput, config_.thermostatInvertInput);
+            config_.thermostatInvertOutput);
         boiler_ = std::make_unique<OpenTherm>(
             config_.boilerInPin, config_.boilerOutPin, false,
-            config_.boilerInvertOutput, config_.boilerInvertInput);
+            config_.boilerInvertOutput);
 
         // Initialize OpenTherm instances
         thermostat_->begin(true);
-        boiler_->begin();
+        boiler_->begin(true);
 
         running_ = true;
 

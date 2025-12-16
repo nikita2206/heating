@@ -11,6 +11,7 @@ ESP-IDF port
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include <cstring>
 
 // Helper macro for bit reading
 #define bitRead(value, bit) (((value) >> (bit)) & 0x01)
@@ -21,28 +22,44 @@ static void monitorTaskEntry(void* pvParameters) {
     vTaskDelete(nullptr);
 }
 
-static bool on_rmt_rx_done(rmt_channel_handle_t rx_chan, const rmt_rx_done_event_data_t *edata, void *user_ctx) {
-    ot::OpenTherm* otInstance = static_cast<ot::OpenTherm*>(user_ctx);
-    return otInstance->handleRMTFrame(edata);
-}
-
-
 namespace ot {
 
-OpenTherm::OpenTherm(gpio_num_t inPin, gpio_num_t outPin, bool isSlave, bool invertOutput, bool invertInput) :
+bool IRAM_ATTR on_rmt_rx_done(rmt_channel_handle_t rx_chan, const rmt_rx_done_event_data_t *edata, void *user_ctx) {
+    OpenTherm* instance = static_cast<OpenTherm*>(user_ctx);
+    BaseType_t high_task_wakeup = pdFALSE;
+
+    // Record frame size from current buffer (the one RMT just finished writing)
+    instance->rmtFrameSize_ = edata->num_symbols;
+    instance->rmtFrameReady_ = true;
+
+    // Swap to the other buffer for the next receive (task will restart receive)
+    instance->rmtActiveBuffer_ = 1 - instance->rmtActiveBuffer_;
+
+    // Notify the task to process the frame and restart receive
+    if (instance->monitorTaskHandle_ != nullptr) {
+        vTaskNotifyGiveFromISR(instance->monitorTaskHandle_, &high_task_wakeup);
+    }
+
+    return high_task_wakeup == pdTRUE;
+}
+
+OpenTherm::OpenTherm(gpio_num_t inPin, gpio_num_t outPin, bool isSlave, bool invertOutput) :
     status(OpenThermStatus::NOT_INITIALIZED),
     inPin(inPin),
     outPin(outPin),
     isSlave(isSlave),
     invertOutput(invertOutput),
-    invertInput(invertInput),
     response(0),
     responseStatus(OpenThermResponseStatus::NONE),
     responseTimestamp(0),
     monitorTaskHandle_(nullptr),
     rmtChannel_(nullptr),
-    useRMT_(false)
+    useRMT_(false),
+    rmtActiveBuffer_(0),
+    rmtFrameSize_(0),
+    rmtFrameReady_(false)
 {
+    memset(rmtRxBuffers_, 0, sizeof(rmtRxBuffers_));
 }
 
 void OpenTherm::begin(bool useRMT)
@@ -77,7 +94,7 @@ void OpenTherm::begin(bool useRMT)
         BaseType_t ret = xTaskCreatePinnedToCore(
             monitorTaskEntry,
             "ot_rmt_monitor",
-            4096, // Stack size (bytes) - adjust as needed
+            8192, // Stack size (bytes) - parseRMTSymbols needs ~3KB for log buffer
             this,
             configMAX_PRIORITIES - 1, // High priority
             &monitorTaskHandle_,
@@ -130,7 +147,9 @@ void OpenTherm::begin(bool useRMT)
 
 void OpenTherm::initRMT()
 {
-    // Configure RMT RX channel using modern API
+    ESP_LOGI("OpenTherm", "Initializing RMT for GPIO %d", inPin);
+
+    // Configure RMT RX channel
     rmt_rx_channel_config_t rx_config = {
         .gpio_num = inPin,
         .clk_src = RMT_CLK_SRC_DEFAULT,
@@ -139,25 +158,36 @@ void OpenTherm::initRMT()
     };
 
     ESP_ERROR_CHECK(rmt_new_rx_channel(&rx_config, &rmtChannel_));
+    ESP_LOGI("OpenTherm", "RMT channel created: %p", rmtChannel_);
 
-    // Register event callbacks for received frames
+    // Register event callbacks - pass this instance as user context
     rmt_rx_event_callbacks_t cbs = {
         .on_recv_done = on_rmt_rx_done,
     };
     ESP_ERROR_CHECK(rmt_rx_register_event_callbacks(rmtChannel_, &cbs, this));
+    ESP_LOGI("OpenTherm", "RMT callbacks registered");
 
     // Enable the channel
     ESP_ERROR_CHECK(rmt_enable(rmtChannel_));
+    ESP_LOGI("OpenTherm", "RMT channel enabled");
 }
 
 void OpenTherm::startRMTReceive()
 {
     if (useRMT_ && rmtChannel_) {
+        ESP_LOGI("OpenTherm", "Starting RMT reception...");
+        // Use receive config appropriate for OpenTherm Manchester encoding
+        // Half-bits are ~500μs, full bits ~1000μs, so allow some tolerance
         rmt_receive_config_t receive_config = {
-            .signal_range_min_ns = 1250,  // Minimum pulse width (filter very short glitches)
-            .signal_range_max_ns = 120000000,  // Maximum pulse width (allow long frames, ~120ms)
+            .signal_range_min_ns = 3000,  // 3μs minimum (filter noise)
+            .signal_range_max_ns = 2000000, // 2000μs maximum (allow tolerance)
         };
-        ESP_ERROR_CHECK(rmt_receive(rmtChannel_, nullptr, 0, &receive_config));
+        // Start with buffer 0
+        rmtActiveBuffer_ = 0;
+        ESP_ERROR_CHECK(rmt_receive(rmtChannel_, rmtRxBuffers_[0], sizeof(rmtRxBuffers_[0]), &receive_config));
+        ESP_LOGI("OpenTherm", "RMT reception started");
+    } else {
+        ESP_LOGE("OpenTherm", "RMT not initialized: useRMT_=%d, rmtChannel_=%p", useRMT_, rmtChannel_);
     }
 }
 
@@ -175,8 +205,7 @@ bool IRAM_ATTR OpenTherm::isReady()
 
 int IRAM_ATTR OpenTherm::readState()
 {
-    int level = gpio_get_level(inPin);
-    return invertInput ? !level : level;
+    return gpio_get_level(inPin);
 }
 
 void OpenTherm::setActiveState()
@@ -365,10 +394,62 @@ void IRAM_ATTR OpenTherm::handleInterruptHelper(void* ptr)
 
 void OpenTherm::monitorInterrupts()
 {
-    // With modern RMT API, reception is handled via callbacks, not polling
-    // This task only exists for GPIO interrupt mode
-    if (!useRMT_) {
+    if (useRMT_) {
+        monitorRMT();
+    } else {
         monitorGPIOInterrupts();
+    }
+}
+
+void OpenTherm::monitorRMT()
+{
+    rmt_receive_config_t receive_config = {
+        .signal_range_min_ns = 3000,
+        .signal_range_max_ns = 2000000,
+    };
+
+    while (true) {
+        // Wait for notification from RMT callback
+        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+
+        // Check if frame is ready (callback sets this)
+        if (!rmtFrameReady_) {
+            continue;
+        }
+
+        // Get frame size and determine which buffer has the completed data
+        // The completed buffer is the one NOT currently active (callback swapped it)
+        size_t frameSize = rmtFrameSize_;
+        uint8_t completedBuffer = 1 - rmtActiveBuffer_;
+        rmtFrameReady_ = false;
+
+        // Restart receive ASAP with the new active buffer (before processing)
+        esp_err_t err = rmt_receive(rmtChannel_, rmtRxBuffers_[rmtActiveBuffer_],
+                                    sizeof(rmtRxBuffers_[0]), &receive_config);
+        if (err != ESP_OK) {
+            // Channel may need re-enabling
+            ESP_LOGW("OpenTherm", "rmt_receive failed (%d), re-enabling channel", err);
+            rmt_enable(rmtChannel_);
+            rmt_receive(rmtChannel_, rmtRxBuffers_[rmtActiveBuffer_],
+                       sizeof(rmtRxBuffers_[0]), &receive_config);
+        }
+
+        // Parse the RMT symbols from the completed buffer
+        uint32_t parsedFrame = parseRMTSymbols(rmtRxBuffers_[completedBuffer], frameSize);
+
+        if (parsedFrame != 0) {
+            response = parsedFrame;
+            responseTimestamp = esp_timer_get_time();
+
+            // Validate based on mode: slave expects requests, master expects responses
+            bool valid = isSlave ? isValidRequest(parsedFrame, isSlave) : isValidResponse(parsedFrame, isSlave);
+            responseStatus = valid ? OpenThermResponseStatus::SUCCESS : OpenThermResponseStatus::INVALID;
+            status = OpenThermStatus::RESPONSE_READY;
+        } else if (status == OpenThermStatus::RESPONSE_WAITING) {
+            // Frame parsing failed while we were expecting a response - mark as invalid
+            responseTimestamp = esp_timer_get_time();
+            status = OpenThermStatus::RESPONSE_INVALID;
+        }
     }
 }
 
@@ -416,37 +497,6 @@ void OpenTherm::monitorGPIOInterrupts()
         }
         //portENABLE_INTERRUPTS();
     }
-}
-
-bool OpenTherm::handleRMTFrame(const rmt_rx_done_event_data_t *edata)
-{
-    if (!useRMT_) return false;
-
-    // Parse the RMT symbols into Manchester-encoded OpenTherm frame
-    uint32_t parsedFrame = parseRMTSymbols(edata->received_symbols, edata->num_symbols);
-
-    if (parsedFrame != 0) {
-        response = parsedFrame;
-        responseTimestamp = esp_timer_get_time();
-
-        // Validate based on mode: slave expects requests, master expects responses
-        bool valid = isSlave ? isValidRequest(parsedFrame, isSlave) : isValidResponse(parsedFrame, isSlave);
-        responseStatus = valid ? OpenThermResponseStatus::SUCCESS : OpenThermResponseStatus::INVALID;
-        status = OpenThermStatus::RESPONSE_READY;
-    } else if (status == OpenThermStatus::RESPONSE_WAITING) {
-        // Frame parsing failed while we were expecting a response - mark as invalid
-        responseTimestamp = esp_timer_get_time();
-        status = OpenThermStatus::RESPONSE_INVALID;
-    }
-
-    // Restart reception for next frame
-    rmt_receive_config_t receive_config = {
-        .signal_range_min_ns = 1250,  // Minimum pulse width (filter very short glitches)
-        .signal_range_max_ns = 120000000,  // Maximum pulse width (allow long frames, ~120ms)
-    };
-    ESP_ERROR_CHECK(rmt_receive(rmtChannel_, nullptr, 0, &receive_config));
-
-    return false; // No high-priority task woken
 }
 
 unsigned long OpenTherm::process(std::function<void(unsigned long, OpenThermResponseStatus)> callback)
@@ -811,6 +861,22 @@ uint32_t OpenTherm::parseRMTSymbols(rmt_symbol_word_t* symbols, size_t num_symbo
     // We expect 68 half-bits for a complete frame (1 start + 32 data + 1 stop bits × 2)
     bool halfLevels[68];
     int halfCount = 0;
+    bool skipFirstPart = false;
+
+    // Check if we need to prepend an implicit HIGH half-bit
+    // When idle is HIGH and first data symbol is LOW, the start bit's first half is merged with idle
+    if (num_symbols > 0) {
+        rmt_symbol_word_t first = symbols[0];
+        if (first.level0 == 1 && first.duration0 > 0) {
+            // First symbol starts HIGH - check if second part is LOW
+            if (first.level1 == 0 && first.duration1 > 0) {
+                // Idle HIGH merged with start bit - prepend implicit HIGH half
+                // and skip the first H part (which is the merged idle)
+                halfLevels[halfCount++] = 1;
+                skipFirstPart = true;
+            }
+        }
+    }
 
     // Process each RMT symbol
     for (size_t i = 0; i < num_symbols && halfCount < 68; i++) {
@@ -822,11 +888,19 @@ uint32_t OpenTherm::parseRMTSymbols(rmt_symbol_word_t* symbols, size_t num_symbo
 
         // Process each part of the symbol
         for (int part = 0; part < 2 && halfCount < 68; part++) {
+            // Skip the first part of first symbol if we prepended implicit HIGH
+            if (i == 0 && part == 0 && skipFirstPart) {
+                continue;
+            }
+
             uint32_t dur = durations[part];
             bool level = levels[part];
 
-            // Skip very short pulses (noise)
-            if (dur < 100) continue;  // Skip pulses < 100μs
+            // Skip duration-0 entries (RMT end-of-frame marker or noise)
+            if (dur == 0) continue;
+
+            // Skip very short pulses (noise) but not zero
+            if (dur < 100) continue;
 
             int halves = 0;
             if (dur >= ONE_MIN && dur < ONE_MAX) {
@@ -843,6 +917,12 @@ uint32_t OpenTherm::parseRMTSymbols(rmt_symbol_word_t* symbols, size_t num_symbo
                 halfLevels[halfCount++] = level;
             }
         }
+    }
+
+    // If we're exactly 1 short and last level was HIGH, infer final LOW half-bit
+    // (stop bit second half isn't captured because signal stays LOW with no edge)
+    if (halfCount == 67 && halfLevels[66] == 1) {
+        halfLevels[halfCount++] = 0;  // Infer final LOW half-bit
     }
 
     // We need exactly 68 half-bits for a complete frame
