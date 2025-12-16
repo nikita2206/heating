@@ -54,29 +54,35 @@ OpenTherm::OpenTherm(gpio_num_t inPin, gpio_num_t outPin, bool isSlave, bool inv
     responseTimestamp(0),
     monitorTaskHandle_(nullptr),
     rmtChannel_(nullptr),
+    rmtTxChannel_(nullptr),
+    rmtCopyEncoder_(nullptr),
     useRMT_(false),
     rmtActiveBuffer_(0),
     rmtFrameSize_(0),
     rmtFrameReady_(false)
 {
     memset(rmtRxBuffers_, 0, sizeof(rmtRxBuffers_));
+    memset(rmtTxBuffer_, 0, sizeof(rmtTxBuffer_));
 }
 
 void OpenTherm::begin(bool useRMT)
 {
     useRMT_ = useRMT;
 
-    // Configure output pin (common for both modes)
-    gpio_config_t out_conf = {
-        .pin_bit_mask = (1ULL << outPin),
-        .mode = GPIO_MODE_OUTPUT,
-        .pull_up_en = GPIO_PULLUP_DISABLE,
-        .pull_down_en = GPIO_PULLDOWN_DISABLE,
-        .intr_type = GPIO_INTR_DISABLE,
-    };
-    gpio_config(&out_conf);
-
     if (useRMT) {
+        // Set output GPIO to idle state BEFORE RMT takes control of it
+        // This ensures the boiler sees a proper idle state during initialization
+        gpio_config_t out_conf = {
+            .pin_bit_mask = (1ULL << outPin),
+            .mode = GPIO_MODE_OUTPUT,
+            .pull_up_en = GPIO_PULLUP_DISABLE,
+            .pull_down_en = GPIO_PULLDOWN_DISABLE,
+            .intr_type = GPIO_INTR_DISABLE,
+        };
+        gpio_config(&out_conf);
+        gpio_set_level(outPin, invertOutput ? 0 : 1);  // Set idle level
+        vTaskDelay(pdMS_TO_TICKS(1000));  // Wait for boiler to recognize idle state
+
         // Configure input pin for RMT (no internal pull-up - OpenTherm interface has its own)
         gpio_config_t in_conf = {
             .pin_bit_mask = (1ULL << inPin),
@@ -87,8 +93,9 @@ void OpenTherm::begin(bool useRMT)
         };
         gpio_config(&in_conf);
 
-        // Initialize RMT
+        // Initialize RMT for RX and TX
         initRMT();
+        initRMTTx();
 
         // Create monitoring task (for RMT data processing) - though modern RMT uses callbacks
         BaseType_t ret = xTaskCreatePinnedToCore(
@@ -109,6 +116,16 @@ void OpenTherm::begin(bool useRMT)
         // Start RMT reception
         startRMTReceive();
     } else {
+        // Configure output pin for bit-banging mode
+        gpio_config_t out_conf = {
+            .pin_bit_mask = (1ULL << outPin),
+            .mode = GPIO_MODE_OUTPUT,
+            .pull_up_en = GPIO_PULLUP_DISABLE,
+            .pull_down_en = GPIO_PULLDOWN_DISABLE,
+            .intr_type = GPIO_INTR_DISABLE,
+        };
+        gpio_config(&out_conf);
+
         // Configure input pin for GPIO interrupts (no internal pull-up - OpenTherm interface has its own)
         gpio_config_t in_conf = {
             .pin_bit_mask = (1ULL << inPin),
@@ -139,9 +156,12 @@ void OpenTherm::begin(bool useRMT)
         gpio_install_isr_service(0);
 
         gpio_isr_handler_add(inPin, OpenTherm::handleInterruptHelper, this);
+
+        // Activate boiler (set idle state and wait) - only needed for non-RMT mode
+        // since RMT mode already did this before taking control of the GPIO
+        activateBoiler();
     }
 
-    activateBoiler();
     status = OpenThermStatus::READY;
 }
 
@@ -169,7 +189,36 @@ void OpenTherm::initRMT()
 
     // Enable the channel
     ESP_ERROR_CHECK(rmt_enable(rmtChannel_));
-    ESP_LOGI("OpenTherm", "RMT channel enabled");
+    ESP_LOGI("OpenTherm", "RMT RX channel enabled");
+}
+
+void OpenTherm::initRMTTx()
+{
+    ESP_LOGI("OpenTherm", "Initializing RMT TX for GPIO %d", outPin);
+
+    // Configure RMT TX channel
+    rmt_tx_channel_config_t tx_config = {
+        .gpio_num = outPin,
+        .clk_src = RMT_CLK_SRC_DEFAULT,
+        .resolution_hz = 1000000,  // 1MHz resolution (1μs ticks)
+        .mem_block_symbols = 64,   // Memory block size
+        .trans_queue_depth = 4,    // Transaction queue depth
+    };
+
+    ESP_ERROR_CHECK(rmt_new_tx_channel(&tx_config, &rmtTxChannel_));
+    ESP_LOGI("OpenTherm", "RMT TX channel created: %p", rmtTxChannel_);
+
+    // Create a copy encoder (simply copies pre-encoded symbols)
+    rmt_copy_encoder_config_t copy_encoder_config = {};
+    ESP_ERROR_CHECK(rmt_new_copy_encoder(&copy_encoder_config, &rmtCopyEncoder_));
+    ESP_LOGI("OpenTherm", "RMT copy encoder created");
+
+    // Enable the TX channel
+    ESP_ERROR_CHECK(rmt_enable(rmtTxChannel_));
+    ESP_LOGI("OpenTherm", "RMT TX channel enabled");
+
+    // Set idle level to match idle state (inverted if invertOutput is set)
+    // Note: RMT idle level is set per-transmission via transmit config
 }
 
 void OpenTherm::startRMTReceive()
@@ -196,6 +245,91 @@ void OpenTherm::stopRMTReceive()
     if (useRMT_ && rmtChannel_) {
         ESP_ERROR_CHECK(rmt_disable(rmtChannel_));
     }
+}
+
+size_t OpenTherm::encodeFrameToRMT(unsigned long frame, rmt_symbol_word_t* symbols)
+{
+    // OpenTherm Manchester encoding:
+    // Bit '1' = HIGH for 500μs, then LOW for 500μs (falling edge in middle)
+    // Bit '0' = LOW for 500μs, then HIGH for 500μs (rising edge in middle)
+    // Frame: Start bit (1) + 32 data bits (MSB first) + Stop bit (1) = 34 bits
+
+    constexpr uint32_t HALF_BIT_US = 500;  // 500μs per half-bit
+
+    // Determine actual levels based on invertOutput
+    // Normal: active=LOW (0), idle=HIGH (1) for OpenTherm interface
+    // With invertOutput: active=HIGH (1), idle=LOW (0)
+    const uint32_t activeLevel = invertOutput ? 1 : 0;
+    const uint32_t idleLevel = invertOutput ? 0 : 1;
+
+    size_t symbolIdx = 0;
+
+    // Encode 34 bits: start (1) + 32 data bits + stop (1)
+    // Build the full 34-bit sequence
+    uint64_t fullFrame = 0;
+    fullFrame |= (1ULL << 33);                    // Start bit (bit 33)
+    fullFrame |= ((uint64_t)frame << 1);          // Data bits (bits 32-1)
+    fullFrame |= 1ULL;                             // Stop bit (bit 0)
+
+    for (int i = 33; i >= 0; i--) {
+        bool bit = (fullFrame >> i) & 1;
+
+        if (bit) {
+            // Bit '1': active->idle (HIGH then LOW normally, but inverted per interface)
+            // OpenTherm: '1' = high-to-low transition in middle of bit period
+            symbols[symbolIdx].level0 = activeLevel;
+            symbols[symbolIdx].duration0 = HALF_BIT_US;
+            symbols[symbolIdx].level1 = idleLevel;
+            symbols[symbolIdx].duration1 = HALF_BIT_US;
+        } else {
+            // Bit '0': idle->active (LOW then HIGH normally)
+            // OpenTherm: '0' = low-to-high transition in middle of bit period
+            symbols[symbolIdx].level0 = idleLevel;
+            symbols[symbolIdx].duration0 = HALF_BIT_US;
+            symbols[symbolIdx].level1 = activeLevel;
+            symbols[symbolIdx].duration1 = HALF_BIT_US;
+        }
+        symbolIdx++;
+    }
+
+    return symbolIdx;  // Should be 34
+}
+
+bool OpenTherm::sendFrameRMT(unsigned long frame)
+{
+    if (!rmtTxChannel_ || !rmtCopyEncoder_) {
+        ESP_LOGE("OpenTherm", "RMT TX not initialized");
+        return false;
+    }
+
+    // Encode the frame to RMT symbols
+    size_t numSymbols = encodeFrameToRMT(frame, rmtTxBuffer_);
+
+    // Configure transmission
+    rmt_transmit_config_t tx_config = {
+        .loop_count = 0,  // No looping
+        .flags = {
+            .eot_level = static_cast<uint32_t>(invertOutput ? 0 : 1),  // Idle level after transmission
+        },
+    };
+
+    // Transmit the symbols
+    esp_err_t err = rmt_transmit(rmtTxChannel_, rmtCopyEncoder_,
+                                  rmtTxBuffer_, numSymbols * sizeof(rmt_symbol_word_t),
+                                  &tx_config);
+    if (err != ESP_OK) {
+        ESP_LOGE("OpenTherm", "RMT transmit failed: %d", err);
+        return false;
+    }
+
+    // Wait for transmission to complete (34 bits * 1ms = 34ms max)
+    err = rmt_tx_wait_all_done(rmtTxChannel_, 50);  // 50ms timeout
+    if (err != ESP_OK) {
+        ESP_LOGE("OpenTherm", "RMT TX wait failed: %d", err);
+        return false;
+    }
+
+    return true;
 }
 
 bool IRAM_ATTR OpenTherm::isReady()
@@ -240,12 +374,10 @@ void OpenTherm::sendBit(bool high)
 
 bool OpenTherm::sendRequestAsync(unsigned long request)
 {
-    //portDISABLE_INTERRUPTS();
     const bool ready = isReady();
 
     if (!ready)
     {
-        //portENABLE_INTERRUPTS();
         return false;
     }
 
@@ -253,28 +385,35 @@ bool OpenTherm::sendRequestAsync(unsigned long request)
     response = 0;
     responseStatus = OpenThermResponseStatus::NONE;
 
-    BaseType_t schedulerState = xTaskGetSchedulerState();
-    if (schedulerState == taskSCHEDULER_RUNNING)
-    {
-        vTaskSuspendAll();
-    }
+    if (useRMT_) {
+        // Use RMT for hardware-timed transmission
+        if (!sendFrameRMT(request)) {
+            status = OpenThermStatus::READY;
+            return false;
+        }
+    } else {
+        // Use bit-banging with scheduler suspension for timing
+        BaseType_t schedulerState = xTaskGetSchedulerState();
+        if (schedulerState == taskSCHEDULER_RUNNING)
+        {
+            vTaskSuspendAll();
+        }
 
-    //portENABLE_INTERRUPTS();
+        sendBit(true); // start bit
+        for (int i = 31; i >= 0; i--)
+        {
+            sendBit(bitRead(request, i));
+        }
+        sendBit(true); // stop bit
+        setIdleState();
 
-    sendBit(true); // start bit
-    for (int i = 31; i >= 0; i--)
-    {
-        sendBit(bitRead(request, i));
+        if (schedulerState == taskSCHEDULER_RUNNING) {
+            xTaskResumeAll();
+        }
     }
-    sendBit(true); // stop bit
-    setIdleState();
 
     responseTimestamp = esp_timer_get_time();
     status = OpenThermStatus::RESPONSE_WAITING;
-
-    if (schedulerState == taskSCHEDULER_RUNNING) {
-        xTaskResumeAll();
-    }
 
     return true;
 }
@@ -296,13 +435,11 @@ unsigned long OpenTherm::sendRequest(unsigned long request)
 
 bool OpenTherm::sendResponse(unsigned long request)
 {
-    portDISABLE_INTERRUPTS();
     // Allow sending response when READY or DELAY (after receiving a request in slave mode)
     const bool canSend = (status == OpenThermStatus::READY || status == OpenThermStatus::DELAY);
 
     if (!canSend)
     {
-        portENABLE_INTERRUPTS();
         return false;
     }
 
@@ -310,27 +447,38 @@ bool OpenTherm::sendResponse(unsigned long request)
     response = 0;
     responseStatus = OpenThermResponseStatus::NONE;
 
-    BaseType_t schedulerState = xTaskGetSchedulerState();
-    if (schedulerState == taskSCHEDULER_RUNNING)
-    {
-        vTaskSuspendAll();
+    if (useRMT_) {
+        // Use RMT for hardware-timed transmission
+        if (!sendFrameRMT(request)) {
+            status = OpenThermStatus::READY;
+            return false;
+        }
+    } else {
+        // Use bit-banging with scheduler suspension for timing
+        portDISABLE_INTERRUPTS();
+
+        BaseType_t schedulerState = xTaskGetSchedulerState();
+        if (schedulerState == taskSCHEDULER_RUNNING)
+        {
+            vTaskSuspendAll();
+        }
+
+        portENABLE_INTERRUPTS();
+
+        sendBit(true); // start bit
+        for (int i = 31; i >= 0; i--)
+        {
+            sendBit(bitRead(request, i));
+        }
+        sendBit(true); // stop bit
+        setIdleState();
+
+        if (schedulerState == taskSCHEDULER_RUNNING) {
+            xTaskResumeAll();
+        }
     }
 
-    portENABLE_INTERRUPTS();
-
-    sendBit(true); // start bit
-    for (int i = 31; i >= 0; i--)
-    {
-        sendBit(bitRead(request, i));
-    }
-    sendBit(true); // stop bit
-    setIdleState();
     status = OpenThermStatus::READY;
-
-    if (schedulerState == taskSCHEDULER_RUNNING) {
-        xTaskResumeAll();
-    }
-
     return true;
 }
 
@@ -619,10 +767,22 @@ bool OpenTherm::isValidRequest(unsigned long request, bool isSlave)
 void OpenTherm::end()
 {
     if (useRMT_) {
+        // Clean up RX channel
         if (rmtChannel_) {
             ESP_ERROR_CHECK(rmt_disable(rmtChannel_));
             ESP_ERROR_CHECK(rmt_del_channel(rmtChannel_));
             rmtChannel_ = nullptr;
+        }
+        // Clean up TX channel
+        if (rmtTxChannel_) {
+            ESP_ERROR_CHECK(rmt_disable(rmtTxChannel_));
+            ESP_ERROR_CHECK(rmt_del_channel(rmtTxChannel_));
+            rmtTxChannel_ = nullptr;
+        }
+        // Clean up encoder
+        if (rmtCopyEncoder_) {
+            ESP_ERROR_CHECK(rmt_del_encoder(rmtCopyEncoder_));
+            rmtCopyEncoder_ = nullptr;
         }
     } else {
         gpio_isr_handler_remove(inPin);

@@ -17,7 +17,9 @@ P MGS-TYPE SPARE DATA-ID  DATA-VALUE
 #include <functional>
 #include "driver/gpio.h"
 #include "driver/rmt_rx.h"
+#include "driver/rmt_tx.h"
 #include "driver/rmt_types.h"
+#include "driver/rmt_encoder.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
@@ -248,9 +250,12 @@ private:
 
     // RMT methods
     void initRMT();
+    void initRMTTx();
     void startRMTReceive();
     void stopRMTReceive();
     uint32_t parseRMTSymbols(rmt_symbol_word_t* symbols, size_t num_symbols);
+    size_t encodeFrameToRMT(unsigned long frame, rmt_symbol_word_t* symbols);
+    bool sendFrameRMT(unsigned long frame);
     const gpio_num_t inPin;
     const gpio_num_t outPin;
     const bool isSlave;
@@ -278,14 +283,19 @@ private:
     TaskHandle_t monitorTaskHandle_;
 
     // RMT-related members
-    rmt_channel_handle_t rmtChannel_;
+    rmt_channel_handle_t rmtChannel_;      // RX channel
+    rmt_channel_handle_t rmtTxChannel_;    // TX channel
+    rmt_encoder_handle_t rmtCopyEncoder_;  // Copy encoder for TX
     bool useRMT_;  // Flag to switch between interrupt and RMT mode
 
-    // Double buffering for RMT: one buffer for hardware, one for processing
+    // Double buffering for RMT RX: one buffer for hardware, one for processing
     rmt_symbol_word_t rmtRxBuffers_[2][128];
     volatile uint8_t rmtActiveBuffer_;    // Which buffer RMT is writing to (0 or 1)
     volatile size_t rmtFrameSize_;        // Number of symbols received (set by ISR)
     volatile bool rmtFrameReady_;         // Flag to indicate frame ready for processing
+
+    // TX buffer for RMT (34 bits = 34 symbols max)
+    rmt_symbol_word_t rmtTxBuffer_[34];
 
     void sendBit(bool high);
 };
