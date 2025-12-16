@@ -369,7 +369,7 @@ private:
 
                 int64_t t0 = esp_timer_get_time();
 
-                if (loopCount % 15 == 0 || request == 0 || status == OpenThermResponseStatus::INVALID) {
+                if (loopCount % 15 == 0 || request == 0 || status == OpenThermResponseStatus::INVALID || dataId == 0) {
                     request = boiler_->buildSetBoilerStatusRequest(true, true, false, false, false);
                     ESP_LOGI(TAG, "Swapping boiler request to Status frame: 0x%08lX", request);
                     logMessage("REQUEST", MessageSource::GatewayBoiler, Frame(request));
