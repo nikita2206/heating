@@ -21,6 +21,12 @@ static void monitorTaskEntry(void* pvParameters) {
     vTaskDelete(nullptr);
 }
 
+static bool on_rmt_rx_done(rmt_channel_handle_t rx_chan, const rmt_rx_done_event_data_t *edata, void *user_ctx) {
+    ot::OpenTherm* otInstance = static_cast<ot::OpenTherm*>(user_ctx);
+    return otInstance->handleRMTFrame(edata);
+}
+
+
 namespace ot {
 
 OpenTherm::OpenTherm(gpio_num_t inPin, gpio_num_t outPin, bool isSlave, bool invertOutput, bool invertInput) :
@@ -33,23 +39,17 @@ OpenTherm::OpenTherm(gpio_num_t inPin, gpio_num_t outPin, bool isSlave, bool inv
     response(0),
     responseStatus(OpenThermResponseStatus::NONE),
     responseTimestamp(0),
-    monitorTaskHandle_(nullptr)
+    monitorTaskHandle_(nullptr),
+    rmtChannel_(nullptr),
+    useRMT_(false)
 {
 }
 
-void OpenTherm::begin()
+void OpenTherm::begin(bool useRMT)
 {
-    // Configure input pin (no internal pull-up - OpenTherm interface has its own)
-    gpio_config_t in_conf = {
-        .pin_bit_mask = (1ULL << inPin),
-        .mode = GPIO_MODE_INPUT,
-        .pull_up_en = GPIO_PULLUP_DISABLE,
-        .pull_down_en = GPIO_PULLDOWN_DISABLE,
-        .intr_type = GPIO_INTR_ANYEDGE,
-    };
-    gpio_config(&in_conf);
+    useRMT_ = useRMT;
 
-    // Configure output pin
+    // Configure output pin (common for both modes)
     gpio_config_t out_conf = {
         .pin_bit_mask = (1ULL << outPin),
         .mode = GPIO_MODE_OUTPUT,
@@ -59,28 +59,113 @@ void OpenTherm::begin()
     };
     gpio_config(&out_conf);
 
-    // Create monitoring task before enabling interrupts
-    BaseType_t ret = xTaskCreatePinnedToCore(
-        monitorTaskEntry,
-        "ot_monitor",
-        4096, // Stack size (bytes) - adjust as needed
-        this,
-        configMAX_PRIORITIES - 1, // High priority
-        &monitorTaskHandle_,
-        0 // Core ID (0 or 1 on ESP32, or tskNO_AFFINITY)
-    );
+    if (useRMT) {
+        // Configure input pin for RMT (no internal pull-up - OpenTherm interface has its own)
+        gpio_config_t in_conf = {
+            .pin_bit_mask = (1ULL << inPin),
+            .mode = GPIO_MODE_INPUT,
+            .pull_up_en = GPIO_PULLUP_DISABLE,
+            .pull_down_en = GPIO_PULLDOWN_DISABLE,
+            .intr_type = GPIO_INTR_DISABLE,  // No GPIO interrupts when using RMT
+        };
+        gpio_config(&in_conf);
 
-    if (ret != pdPASS) {
-        ESP_LOGE("OpenTherm", "Failed to create monitor task");
-        monitorTaskHandle_ = nullptr;
+        // Initialize RMT
+        initRMT();
+
+        // Create monitoring task (for RMT data processing) - though modern RMT uses callbacks
+        BaseType_t ret = xTaskCreatePinnedToCore(
+            monitorTaskEntry,
+            "ot_rmt_monitor",
+            4096, // Stack size (bytes) - adjust as needed
+            this,
+            configMAX_PRIORITIES - 1, // High priority
+            &monitorTaskHandle_,
+            1 // Core ID (0 or 1 on ESP32, or tskNO_AFFINITY)
+        );
+
+        if (ret != pdPASS) {
+            ESP_LOGE("OpenTherm", "Failed to create RMT monitor task");
+            monitorTaskHandle_ = nullptr;
+        }
+
+        // Start RMT reception
+        startRMTReceive();
+    } else {
+        // Configure input pin for GPIO interrupts (no internal pull-up - OpenTherm interface has its own)
+        gpio_config_t in_conf = {
+            .pin_bit_mask = (1ULL << inPin),
+            .mode = GPIO_MODE_INPUT,
+            .pull_up_en = GPIO_PULLUP_DISABLE,
+            .pull_down_en = GPIO_PULLDOWN_DISABLE,
+            .intr_type = GPIO_INTR_ANYEDGE,
+        };
+        gpio_config(&in_conf);
+
+        // Create monitoring task before enabling interrupts
+        BaseType_t ret = xTaskCreatePinnedToCore(
+            monitorTaskEntry,
+            "ot_monitor",
+            4096, // Stack size (bytes) - adjust as needed
+            this,
+            configMAX_PRIORITIES - 1, // High priority
+            &monitorTaskHandle_,
+            0 // Core ID (0 or 1 on ESP32, or tskNO_AFFINITY)
+        );
+
+        if (ret != pdPASS) {
+            ESP_LOGE("OpenTherm", "Failed to create monitor task");
+            monitorTaskHandle_ = nullptr;
+        }
+
+        // Install ISR service if not already installed
+        gpio_install_isr_service(0);
+
+        gpio_isr_handler_add(inPin, OpenTherm::handleInterruptHelper, this);
     }
 
-    // Install ISR service if not already installed
-    gpio_install_isr_service(0);
-
-    gpio_isr_handler_add(inPin, OpenTherm::handleInterruptHelper, this);
     activateBoiler();
     status = OpenThermStatus::READY;
+}
+
+void OpenTherm::initRMT()
+{
+    // Configure RMT RX channel using modern API
+    rmt_rx_channel_config_t rx_config = {
+        .gpio_num = inPin,
+        .clk_src = RMT_CLK_SRC_DEFAULT,
+        .resolution_hz = 1000000,  // 1MHz resolution (1μs ticks)
+        .mem_block_symbols = 128,  // Memory block size for received symbols
+    };
+
+    ESP_ERROR_CHECK(rmt_new_rx_channel(&rx_config, &rmtChannel_));
+
+    // Register event callbacks for received frames
+    rmt_rx_event_callbacks_t cbs = {
+        .on_recv_done = on_rmt_rx_done,
+    };
+    ESP_ERROR_CHECK(rmt_rx_register_event_callbacks(rmtChannel_, &cbs, this));
+
+    // Enable the channel
+    ESP_ERROR_CHECK(rmt_enable(rmtChannel_));
+}
+
+void OpenTherm::startRMTReceive()
+{
+    if (useRMT_ && rmtChannel_) {
+        rmt_receive_config_t receive_config = {
+            .signal_range_min_ns = 1250,  // Minimum pulse width (filter very short glitches)
+            .signal_range_max_ns = 120000000,  // Maximum pulse width (allow long frames, ~120ms)
+        };
+        ESP_ERROR_CHECK(rmt_receive(rmtChannel_, nullptr, 0, &receive_config));
+    }
+}
+
+void OpenTherm::stopRMTReceive()
+{
+    if (useRMT_ && rmtChannel_) {
+        ESP_ERROR_CHECK(rmt_disable(rmtChannel_));
+    }
 }
 
 bool IRAM_ATTR OpenTherm::isReady()
@@ -280,6 +365,15 @@ void IRAM_ATTR OpenTherm::handleInterruptHelper(void* ptr)
 
 void OpenTherm::monitorInterrupts()
 {
+    // With modern RMT API, reception is handled via callbacks, not polling
+    // This task only exists for GPIO interrupt mode
+    if (!useRMT_) {
+        monitorGPIOInterrupts();
+    }
+}
+
+void OpenTherm::monitorGPIOInterrupts()
+{
     // Frame parsing task - waits for interrupts, then parses complete frames
     while (true) {
         // Wait for first interrupt (start of potential frame)
@@ -322,6 +416,37 @@ void OpenTherm::monitorInterrupts()
         }
         //portENABLE_INTERRUPTS();
     }
+}
+
+bool OpenTherm::handleRMTFrame(const rmt_rx_done_event_data_t *edata)
+{
+    if (!useRMT_) return false;
+
+    // Parse the RMT symbols into Manchester-encoded OpenTherm frame
+    uint32_t parsedFrame = parseRMTSymbols(edata->received_symbols, edata->num_symbols);
+
+    if (parsedFrame != 0) {
+        response = parsedFrame;
+        responseTimestamp = esp_timer_get_time();
+
+        // Validate based on mode: slave expects requests, master expects responses
+        bool valid = isSlave ? isValidRequest(parsedFrame, isSlave) : isValidResponse(parsedFrame, isSlave);
+        responseStatus = valid ? OpenThermResponseStatus::SUCCESS : OpenThermResponseStatus::INVALID;
+        status = OpenThermStatus::RESPONSE_READY;
+    } else if (status == OpenThermStatus::RESPONSE_WAITING) {
+        // Frame parsing failed while we were expecting a response - mark as invalid
+        responseTimestamp = esp_timer_get_time();
+        status = OpenThermStatus::RESPONSE_INVALID;
+    }
+
+    // Restart reception for next frame
+    rmt_receive_config_t receive_config = {
+        .signal_range_min_ns = 1250,  // Minimum pulse width (filter very short glitches)
+        .signal_range_max_ns = 120000000,  // Maximum pulse width (allow long frames, ~120ms)
+    };
+    ESP_ERROR_CHECK(rmt_receive(rmtChannel_, nullptr, 0, &receive_config));
+
+    return false; // No high-priority task woken
 }
 
 unsigned long OpenTherm::process(std::function<void(unsigned long, OpenThermResponseStatus)> callback)
@@ -443,7 +568,16 @@ bool OpenTherm::isValidRequest(unsigned long request, bool isSlave)
 
 void OpenTherm::end()
 {
-    gpio_isr_handler_remove(inPin);
+    if (useRMT_) {
+        if (rmtChannel_) {
+            ESP_ERROR_CHECK(rmt_disable(rmtChannel_));
+            ESP_ERROR_CHECK(rmt_del_channel(rmtChannel_));
+            rmtChannel_ = nullptr;
+        }
+    } else {
+        gpio_isr_handler_remove(inPin);
+    }
+
     if (monitorTaskHandle_ != nullptr) {
         vTaskDelete(monitorTaskHandle_);
         monitorTaskHandle_ = nullptr;
@@ -642,6 +776,124 @@ static inline int popcount32(uint32_t v) {
     while (v) { c += (v & 1u); v >>= 1; }
     return c;
 #endif
+}
+
+uint32_t OpenTherm::parseRMTSymbols(rmt_symbol_word_t* symbols, size_t num_symbols)
+{
+    // Log RMT symbols in compact form: "L:dur,H:dur,..." (L=low, H=high)
+    // Build a compact string showing level and duration for each symbol part
+    // Each entry can be up to ~10 chars (e.g. ",H900000"), 128 symbols × 2 parts max = ~2560 bytes
+    char logBuf[3072];
+    int logPos = 0;
+    for (size_t i = 0; i < num_symbols && logPos < (int)sizeof(logBuf) - 12; i++) {
+        rmt_symbol_word_t symbol = symbols[i];
+        // Log both parts of each symbol
+        for (int part = 0; part < 2 && logPos < (int)sizeof(logBuf) - 12; part++) {
+            uint32_t dur = (part == 0) ? symbol.duration0 : symbol.duration1;
+            uint32_t level = (part == 0) ? symbol.level0 : symbol.level1;
+            int written = snprintf(logBuf + logPos, sizeof(logBuf) - logPos,
+                                   "%s%c%lu", (i > 0 || part > 0 ? "," : ""), (level ? 'H' : 'L'), (unsigned long)dur);
+            if (written > 0) logPos += written;
+        }
+    }
+    // ESP_LOGI("OT", "%s RMT[%d]: %s", isSlave ? "T" : "B", num_symbols, logBuf);
+
+    // Manchester decoding for OpenTherm using RMT symbols
+    // Each RMT symbol represents a pulse: level0 for duration0, then level1 for duration1
+    // For Manchester: bit '1' = high->low, bit '0' = low->high
+
+    constexpr int HALF_US_NOM = 500;  // Nominal half-bit duration
+    constexpr int ONE_MIN = 300;      // Minimum half-bit duration
+    constexpr int ONE_MAX = 700;      // Maximum half-bit duration
+    constexpr int TWO_MIN = 700;      // Minimum 2 half-bits
+    constexpr int TWO_MAX = 1300;     // Maximum 2 half-bits
+
+    // We expect 68 half-bits for a complete frame (1 start + 32 data + 1 stop bits × 2)
+    bool halfLevels[68];
+    int halfCount = 0;
+
+    // Process each RMT symbol
+    for (size_t i = 0; i < num_symbols && halfCount < 68; i++) {
+        rmt_symbol_word_t symbol = symbols[i];
+
+        // Each symbol has two parts: duration0/level0 and duration1/level1
+        uint32_t durations[2] = {symbol.duration0, symbol.duration1};
+        uint32_t levels[2] = {symbol.level0, symbol.level1};
+
+        // Process each part of the symbol
+        for (int part = 0; part < 2 && halfCount < 68; part++) {
+            uint32_t dur = durations[part];
+            bool level = levels[part];
+
+            // Skip very short pulses (noise)
+            if (dur < 100) continue;  // Skip pulses < 100μs
+
+            int halves = 0;
+            if (dur >= ONE_MIN && dur < ONE_MAX) {
+                halves = 1;
+            } else if (dur >= TWO_MIN && dur <= TWO_MAX) {
+                halves = 2;
+            } else {
+                ESP_LOGW("OT", "RMT Invalid duration: %lu μs for symbol %d FRAME: %s", dur, i, logBuf);
+                return 0;  // Invalid frame
+            }
+
+            // Add the appropriate number of half-bits
+            for (int k = 0; k < halves && halfCount < 68; k++) {
+                halfLevels[halfCount++] = level;
+            }
+        }
+    }
+
+    // We need exactly 68 half-bits for a complete frame
+    if (halfCount != 68) {
+        ESP_LOGW("OT", "RMT Half count mismatch: %d (expected 68) FRAME: %s", halfCount, logBuf);
+        return 0;
+    }
+
+    // Decode Manchester: pairs of half-bits form one data bit
+    uint8_t bits[34];
+    for (int b = 0; b < 34; b++) {
+        bool a = halfLevels[2 * b];     // First half-bit
+        bool c = halfLevels[2 * b + 1]; // Second half-bit
+
+        if (a == c) {
+            ESP_LOGW("OT", "RMT Invalid Manchester (no transition): %d FRAME: %s", b, logBuf);
+            return 0;
+        }
+
+        // Manchester encoding: high->low = '1', low->high = '0'
+        if (a == 1 && c == 0) bits[b] = 1;      // Falling edge = '1'
+        else if (a == 0 && c == 1) bits[b] = 0; // Rising edge = '0'
+        else {
+            ESP_LOGW("OT", "RMT Invalid Manchester (wrong transition): %d FRAME: %s", b, logBuf);
+            return 0;
+        }
+    }
+
+    // Start and stop bits must be '1'
+    if (bits[0] != 1) {
+        ESP_LOGW("OT", "RMT Invalid start bit: %d FRAME: %s", bits[0], logBuf);
+        return 0;
+    }
+    if (bits[33] != 1) {
+        ESP_LOGW("OT", "RMT Invalid stop bit: %d FRAME: %s", bits[33], logBuf);
+        return 0;
+    }
+
+    // Build 32-bit frame from bits[1..32], MSB first
+    uint32_t frame = 0;
+    for (int b = 1; b <= 32; b++) {
+        frame = (frame << 1) | (bits[b] & 1u);
+    }
+
+    // Even parity check on the 32 bits
+    if (__builtin_popcount(frame) & 1) {
+        ESP_LOGW("OT", "RMT Invalid parity: %d ones FRAME: %s", __builtin_popcount(frame), logBuf);
+        return 0;
+    }
+
+    return frame;
 }
 
 uint32_t OpenTherm::parseInterrupts(uint32_t interrupts[128], int upToIndex)

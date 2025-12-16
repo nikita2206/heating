@@ -16,6 +16,8 @@ P MGS-TYPE SPARE DATA-ID  DATA-VALUE
 #include <stdint.h>
 #include <functional>
 #include "driver/gpio.h"
+#include "driver/rmt_rx.h"
+#include "driver/rmt_types.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
@@ -177,7 +179,7 @@ public:
     volatile bool midBit;
     uint32_t interruptTimestamps[128];
     int interruptsUpToIndex = 0;
-    void begin();
+    void begin(bool useRMT = false);
     bool isReady();
     unsigned long sendRequest(unsigned long request);
     bool sendResponse(unsigned long request);
@@ -233,6 +235,7 @@ public:
 
 
     void monitorInterrupts();
+    bool handleRMTFrame(const rmt_rx_done_event_data_t *edata);
 
 private:
     const gpio_num_t inPin;
@@ -262,7 +265,18 @@ private:
 
     TaskHandle_t monitorTaskHandle_;
 
+    // RMT-related members
+    rmt_channel_handle_t rmtChannel_;
+    bool useRMT_;  // Flag to switch between interrupt and RMT mode
+
     void sendBit(bool high);
+
+    // RMT methods
+    void initRMT();
+    void startRMTReceive();
+    void stopRMTReceive();
+    void monitorGPIOInterrupts();
+    uint32_t parseRMTSymbols(rmt_symbol_word_t* symbols, size_t num_symbols);
 };
 
 enum class MessageType : uint8_t {

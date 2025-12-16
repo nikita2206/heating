@@ -103,7 +103,7 @@ public:
             config_.boilerInvertOutput, config_.boilerInvertInput);
 
         // Initialize OpenTherm instances
-        thermostat_->begin();
+        thermostat_->begin(true);
         boiler_->begin();
 
         running_ = true;
