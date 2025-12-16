@@ -381,7 +381,7 @@ constexpr char logs_body_formatted[] = R"JS(
         </div>
     </div>
     <script>
-        let ws, logs = document.getElementById('logs'), paused = false, msgCount = 0;
+        let ws, logs, paused = false, msgCount = 0;
         let allMessages = [];
         let sourceFilter = 'all';
         let dataIdFilter = null;
@@ -427,25 +427,25 @@ constexpr char logs_body_formatted[] = R"JS(
 
         // OpenTherm decoding functions (similar to humanize_serial_log.py)
         const MASTER_MSG_TYPES = {
-            0b000: "READ-DATA",
-            0b001: "WRITE-DATA",
-            0b010: "INVALID-DATA",
-            0b011: "RESERVED",
-            0b100: "RESERVED",
-            0b101: "RESERVED",
-            0b110: "RESERVED",
-            0b111: "RESERVED"
+            0: "READ-DATA",
+            1: "WRITE-DATA",
+            2: "INVALID-DATA",
+            3: "RESERVED",
+            4: "RESERVED",
+            5: "RESERVED",
+            6: "RESERVED",
+            7: "RESERVED"
         };
 
         const SLAVE_MSG_TYPES = {
-            0b000: "RESERVED",
-            0b001: "RESERVED",
-            0b010: "RESERVED",
-            0b011: "RESERVED",
-            0b100: "READ-ACK",
-            0b101: "WRITE-ACK",
-            0b110: "DATA-INVALID",
-            0b111: "UNKNOWN-DATAID"
+            0: "RESERVED",
+            1: "RESERVED",
+            2: "RESERVED",
+            3: "RESERVED",
+            4: "READ-ACK",
+            5: "WRITE-ACK",
+            6: "DATA-INVALID",
+            7: "UNKNOWN-DATAID"
         };
 
         function u16_to_s16(v) {
@@ -634,7 +634,21 @@ constexpr char logs_body_formatted[] = R"JS(
             document.getElementById('msg-count').textContent = '0';
         }
 
-        connect();
+        // Wait for DOM to be ready
+        function init() {
+            try {
+                logs = document.getElementById('logs');
+                connect();
+            } catch (e) {
+                console.error('Failed to initialize WebSocket connection:', e);
+            }
+        }
+
+        if (document.readyState === 'loading') {
+            document.addEventListener('DOMContentLoaded', init);
+        } else {
+            init();
+        }
     </script>
 )JS";
 
