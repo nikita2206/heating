@@ -182,12 +182,7 @@ public:
     OpenTherm(gpio_num_t inPin = GPIO_NUM_4, gpio_num_t outPin = GPIO_NUM_5, bool isSlave = false, bool invertOutput = false);
     ~OpenTherm();
     volatile OpenThermStatus status;
-    volatile int64_t lastReceptionTimestamp;
-    volatile int64_t responseStartsAt;
-    volatile bool midBit;
-    uint32_t interruptTimestamps[128];
-    int interruptsUpToIndex = 0;
-    void begin(bool useRMT = false);
+    void begin();
     bool isReady();
     unsigned long sendRequest(unsigned long request);
     bool sendResponse(unsigned long request);
@@ -201,9 +196,6 @@ public:
     unsigned long getLastResponse();
     OpenThermResponseStatus getLastResponseStatus();
     static const char *statusToString(OpenThermResponseStatus status);
-    void handleInterrupt();
-    void newInterruptHandler();
-    static void handleInterruptHelper(void* ptr);
     unsigned long process(std::function<void(unsigned long, OpenThermResponseStatus)> callback = nullptr);
     void end();
 
@@ -245,7 +237,6 @@ public:
     void monitorInterrupts();
 
 private:
-    void monitorGPIOInterrupts();
     void monitorRMT();
 
     // RMT methods
@@ -264,21 +255,6 @@ private:
     volatile unsigned long response;
     volatile OpenThermResponseStatus responseStatus;
     volatile unsigned long responseTimestamp;
-    volatile uint8_t responseBitIndex;
-
-public:
-    volatile uint32_t interruptCount = 0;  // Debug: count interrupts
-    volatile unsigned long lastRawFrame = 0;  // Debug: last successfully received frame
-    volatile unsigned long debugBit31Elapsed = 0;  // Debug: elapsed time when sampling bit 31
-    volatile int debugBit31State = 0;  // Debug: state when sampling bit 31
-private:
-
-    int readState();
-    void setActiveState();
-    void setIdleState();
-    void activateBoiler();
-    uint32_t parseInterrupts(uint32_t interrupts[128], int upToIndex);
-    void logU32Bin(uint32_t v);
 
     TaskHandle_t monitorTaskHandle_;
 
@@ -286,7 +262,6 @@ private:
     rmt_channel_handle_t rmtChannel_;      // RX channel
     rmt_channel_handle_t rmtTxChannel_;    // TX channel
     rmt_encoder_handle_t rmtCopyEncoder_;  // Copy encoder for TX
-    bool useRMT_;  // Flag to switch between interrupt and RMT mode
 
     // Double buffering for RMT RX: one buffer for hardware, one for processing
     rmt_symbol_word_t rmtRxBuffers_[2][128];
@@ -296,8 +271,6 @@ private:
 
     // TX buffer for RMT (34 bits = 34 symbols max)
     rmt_symbol_word_t rmtTxBuffer_[34];
-
-    void sendBit(bool high);
 };
 
 enum class MessageType : uint8_t {

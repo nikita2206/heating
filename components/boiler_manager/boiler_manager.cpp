@@ -103,8 +103,8 @@ public:
             config_.boilerInvertOutput);
 
         // Initialize OpenTherm instances
-        thermostat_->begin(true);
-        boiler_->begin(true);
+        thermostat_->begin();
+        boiler_->begin();
 
         running_ = true;
 
@@ -403,14 +403,10 @@ private:
             // Periodic status logging
             loopCount++;
             if (loopCount % 3000 == 0) {
-                static uint32_t lastInterrupts = 0;
-                uint32_t curInterrupts = thermostat_->interruptCount;
-                ESP_LOGI(TAG, "Heartbeat: valid=%lu invalid=%lu interrupts=+%lu gpio=%d",
+                ESP_LOGI(TAG, "Heartbeat: valid=%lu invalid=%lu gpio=%d",
                          (unsigned long)validFrames,
                          (unsigned long)invalidFrames,
-                         (unsigned long)(curInterrupts - lastInterrupts),
                          gpio_get_level(config_.thermostatInPin));
-                lastInterrupts = curInterrupts;
             }
 
             // Small delay to prevent busy looping
