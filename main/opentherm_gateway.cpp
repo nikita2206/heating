@@ -219,6 +219,9 @@ static void start_gateway() {
     // Set message callback
     s_manager->setMessageCallback(opentherm_message_callback);
 
+    // Set MQTT bridge for diagnostics publishing
+    s_manager->setMqttBridge(s_mqtt.get());
+
     // Start WebSocket server (pass C++ pointers directly)
     websocket_server_set_mqtt(s_mqtt.get());
     if (websocket_server_start(&ws_server, s_manager.get()) != ESP_OK) {

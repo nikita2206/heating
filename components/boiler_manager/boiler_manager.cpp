@@ -26,6 +26,7 @@ struct DiagnosticCmd {
 // Diagnostic commands to poll
 static constexpr DiagnosticCmd DIAG_COMMANDS[] = {
     {25, "Tboiler"},
+    {57, "BoilerStatus"},
     {28, "Tret"},
     {26, "Tdhw"},
     {1, "TSet"},
@@ -181,6 +182,10 @@ public:
 
     void setMessageCallback(MessageCallback callback) {
         messageCallback_ = std::move(callback);
+    }
+
+    void setMqttBridge(MqttBridge* mqtt) {
+        mqttBridge_ = mqtt;
     }
 
 private:
@@ -434,6 +439,11 @@ private:
                 diagnostics_.tBoiler.update(floatVal);
                 publishDiag("tboiler", "Boiler Temperature", "C", diagnostics_.tBoiler);
                 break;
+            case 57:
+                floatVal = response.asFloat();
+                diagnostics_.maxChWaterTemp.update(floatVal);
+                publishDiag("maxchwatertemp", "Max CH Water Temperature", "C", diagnostics_.maxChWaterTemp);
+                break;
             case 28:
                 floatVal = response.asFloat();
                 diagnostics_.tReturn.update(floatVal);
@@ -566,13 +576,9 @@ private:
     }
 
     void publishDiag(const char* id, const char* name, const char* unit, const DiagnosticValue& dv) {
-        // Note: In a full refactor, MqttBridge would be injected
-        // For now, we leave this as a stub since the global mqtt_bridge
-        // singleton pattern from C doesn't translate directly
-        (void)id;
-        (void)name;
-        (void)unit;
-        (void)dv;
+        if (mqttBridge_ && dv.isValid()) {
+            mqttBridge_->publishSensor(id, name, unit, dv.valueOr(0.0f), true);
+        }
     }
 
     ManagerConfig config_;
@@ -588,6 +594,8 @@ private:
     Diagnostics diagnostics_;
     // Callback (for logging)
     MessageCallback messageCallback_;
+    // MQTT bridge for publishing diagnostics
+    MqttBridge* mqttBridge_ = nullptr;
 };
 
 // BoilerManager implementation
@@ -637,6 +645,10 @@ esp_err_t BoilerManager::writeData(uint8_t dataId, uint16_t dataValue,
 
 void BoilerManager::setMessageCallback(MessageCallback callback) {
     impl_->setMessageCallback(std::move(callback));
+}
+
+void BoilerManager::setMqttBridge(MqttBridge* mqtt) {
+    impl_->setMqttBridge(mqtt);
 }
 
 // Helper functions

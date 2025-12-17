@@ -58,6 +58,7 @@ struct DiagnosticValue {
 // Complete diagnostic state
 struct Diagnostics {
     DiagnosticValue tBoiler;
+    DiagnosticValue maxChWaterTemp;
     DiagnosticValue tReturn;
     DiagnosticValue tDhw;
     DiagnosticValue tDhw2;
@@ -166,6 +167,9 @@ public:
 
     // Message callback for logging
     void setMessageCallback(MessageCallback callback);
+
+    // Set MQTT bridge for diagnostics publishing
+    void setMqttBridge(class MqttBridge* mqtt);
 
 private:
     class Impl;
