@@ -210,10 +210,7 @@ static esp_err_t mqtt_config_post_handler(httpd_req_t* req) {
 
     (void)ot::MqttBridge::saveConfig(cfg);
     if (s_mqtt) {
-        s_mqtt->stop();
-        // Note: Would need to recreate MqttBridge with new config to apply changes
-        // For now just restart existing instance
-        (void)s_mqtt->start();
+        (void)s_mqtt->reconfigure(cfg);
     }
 
     httpd_resp_set_type(req, "application/json");

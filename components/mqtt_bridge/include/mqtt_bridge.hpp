@@ -72,6 +72,9 @@ public:
     void stop();
     [[nodiscard]] bool isRunning() const;
 
+    // Reconfigure with new settings (stops, updates config, restarts)
+    [[nodiscard]] esp_err_t reconfigure(const MqttConfig& config);
+
     // Thread-safe state access
     [[nodiscard]] MqttState state() const;
 

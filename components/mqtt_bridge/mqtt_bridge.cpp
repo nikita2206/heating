@@ -90,6 +90,13 @@ public:
 
     bool isRunning() const { return running_; }
 
+    esp_err_t reconfigure(const MqttConfig& config) {
+        stop();
+        config_ = config;
+        buildTopics();
+        return start();
+    }
+
     MqttState state() const {
         MqttState result;
         int64_t nowMs = esp_timer_get_time() / 1000;
@@ -392,6 +399,10 @@ void MqttBridge::stop() {
 
 bool MqttBridge::isRunning() const {
     return impl_->isRunning();
+}
+
+esp_err_t MqttBridge::reconfigure(const MqttConfig& config) {
+    return impl_->reconfigure(config);
 }
 
 MqttState MqttBridge::state() const {
