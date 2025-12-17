@@ -396,6 +396,8 @@ private:
                 bool sent = thermostat_->sendResponse(boilerResponse);
                 int64_t t2 = esp_timer_get_time();
                 ESP_LOGI(TAG, "Response sent to thermostat: %s (took %lld ms total)", sent ? "OK" : "FAILED", (t2 - t0) / 1000);
+
+                parseDiagnosticResponse(respFrame.dataId(), respFrame);
             });
 
             // Periodic status logging
