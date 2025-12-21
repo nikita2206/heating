@@ -53,27 +53,40 @@ static esp_err_t spa_handler(httpd_req_t* req) {
     return ESP_OK;
 }
 
-// Serve gzipped JS bundle (handles wildcard URIs like /assets/index_*.js)
-static esp_err_t js_handler(httpd_req_t* req) {
-    size_t len;
-    const uint8_t* data = web_ui_get_index_js_gz(&len);
-
-    httpd_resp_set_type(req, "application/javascript");
-    httpd_resp_set_hdr(req, "Content-Encoding", "gzip");
-    httpd_resp_set_hdr(req, "Cache-Control", "max-age=31536000, immutable");
-    httpd_resp_send(req, reinterpret_cast<const char*>(data), len);
-    return ESP_OK;
-}
-
-// Serve gzipped CSS bundle (handles wildcard URIs like /assets/index_*.css)
-static esp_err_t css_handler(httpd_req_t* req) {
-    size_t len;
-    const uint8_t* data = web_ui_get_index_css_gz(&len);
-
-    httpd_resp_set_type(req, "text/css");
-    httpd_resp_set_hdr(req, "Content-Encoding", "gzip");
-    httpd_resp_set_hdr(req, "Cache-Control", "max-age=31536000, immutable");
-    httpd_resp_send(req, reinterpret_cast<const char*>(data), len);
+// Serve gzipped assets (handles content-hashed filenames like /assets/index_abc123.js)
+static esp_err_t assets_handler(httpd_req_t* req) {
+    // Extract filename from URI (e.g., /assets/index_abc123.js)
+    const char* uri = req->uri;
+    
+    // Check if it's a JS file (ends with .js)
+    size_t uri_len = strlen(uri);
+    if (uri_len > 3 && strcmp(uri + uri_len - 3, ".js") == 0) {
+        // It's a JS file (regardless of hash in filename)
+        size_t len;
+        const uint8_t* data = web_ui_get_index_js_gz(&len);
+        
+        httpd_resp_set_type(req, "application/javascript");
+        httpd_resp_set_hdr(req, "Content-Encoding", "gzip");
+        httpd_resp_set_hdr(req, "Cache-Control", "max-age=31536000, immutable");
+        httpd_resp_send(req, reinterpret_cast<const char*>(data), len);
+        return ESP_OK;
+    }
+    
+    // Check if it's a CSS file (ends with .css)
+    if (uri_len > 4 && strcmp(uri + uri_len - 4, ".css") == 0) {
+        // It's a CSS file (regardless of hash in filename)
+        size_t len;
+        const uint8_t* data = web_ui_get_index_css_gz(&len);
+        
+        httpd_resp_set_type(req, "text/css");
+        httpd_resp_set_hdr(req, "Content-Encoding", "gzip");
+        httpd_resp_set_hdr(req, "Cache-Control", "max-age=31536000, immutable");
+        httpd_resp_send(req, reinterpret_cast<const char*>(data), len);
+        return ESP_OK;
+    }
+    
+    // Unknown asset type
+    httpd_resp_send_404(req);
     return ESP_OK;
 }
 
@@ -564,11 +577,9 @@ extern "C" esp_err_t websocket_server_start(websocket_server_t* ws_server,
         httpd_register_uri_handler(ws_server->server, &uri);
     }
 
-    // Register asset handlers (wildcard patterns match content-hashed filenames)
-    httpd_uri_t js_uri = { "/assets/index_*.js", HTTP_GET, js_handler, nullptr, false, false, nullptr };
-    httpd_uri_t css_uri = { "/assets/index_*.css", HTTP_GET, css_handler, nullptr, false, false, nullptr };
-    httpd_register_uri_handler(ws_server->server, &js_uri);
-    httpd_register_uri_handler(ws_server->server, &css_uri);
+    // Register asset handler (catch-all for /assets/* to handle content-hashed filenames)
+    httpd_uri_t assets_uri = { "/assets/*", HTTP_GET, assets_handler, nullptr, false, false, nullptr };
+    httpd_register_uri_handler(ws_server->server, &assets_uri);
 
     // Register API handlers
     httpd_uri_t diagnostics_api_uri = { "/api/diagnostics", HTTP_GET, diagnostics_api_handler, nullptr, false, false, nullptr };
