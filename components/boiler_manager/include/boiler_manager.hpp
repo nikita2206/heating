@@ -13,7 +13,7 @@
 #include <functional>
 #include <memory>
 #include <string_view>
-#include "OpenTherm.h"
+#include "open_therm.h"
 #include "esp_err.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"

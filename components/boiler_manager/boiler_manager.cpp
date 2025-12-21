@@ -4,7 +4,7 @@
 
 #include "boiler_manager.hpp"
 #include "mqtt_bridge.hpp"
-#include "OpenTherm.h"
+#include "open_therm.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
@@ -102,9 +102,6 @@ public:
         boiler_ = std::make_unique<OpenTherm>(
             config_.boilerInPin, config_.boilerOutPin, false,
             config_.boilerInvertOutput);
-        
-        thermostat_->setRMTDebugLogging(true);
-        boiler_->setRMTDebugLogging(true);
 
         // Initialize OpenTherm instances
         thermostat_->begin();

@@ -1,0 +1,14 @@
+# Binary test executable
+rmt_parser_test
+
+rmt_parser_test.dSYM/
+
+# Test artifacts
+test_input.txt
+*.o
+*.out
+
+# Python artifacts
+__pycache__/
+*.pyc
+

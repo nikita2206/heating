@@ -1,5 +1,5 @@
 /*
-OpenTherm.h - OpenTherm Library for ESP-IDF
+open_therm.h - OpenTherm Library for ESP-IDF
 https://github.com/ihormelnyk/OpenTherm
 Licensed under MIT license
 Copyright 2023, Ihor Melnyk

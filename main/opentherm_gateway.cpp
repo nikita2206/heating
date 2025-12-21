@@ -26,7 +26,7 @@
 #include "nvs_flash.h"
 
 #include "opentherm_gateway.h"
-#include "OpenTherm.h"
+#include "open_therm.h"
 #include "boiler_manager.hpp"
 #include "mqtt_bridge.hpp"
 
