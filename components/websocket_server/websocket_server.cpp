@@ -435,7 +435,8 @@ static esp_err_t diagnostics_api_handler(httpd_req_t* req) {
         {"max_capacity", diag.maxCapacity}, {"min_mod_level", diag.minModLevel},
         {"fan_setpoint", diag.fanSetpoint}, {"fan_current", diag.fanCurrent},
         {"fan_exhaust_rpm", diag.fanExhaustRpm}, {"fan_supply_rpm", diag.fanSupplyRpm},
-        {"co2_exhaust", diag.co2Exhaust}
+        {"co2_exhaust", diag.co2Exhaust}, {"flame_on", diag.flameOn},
+        {"ch_mode", diag.chMode}, {"dhw_mode", diag.dhwMode}
     };
 
     for (size_t i = 0; i < sizeof(fields) / sizeof(fields[0]); i++) {

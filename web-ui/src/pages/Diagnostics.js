@@ -93,6 +93,36 @@ function updateDiagnostics() {
       if (d.modulation_level) status.innerHTML += renderDiagCard('Modulation Level', d.modulation_level, '%');
       if (d.pressure) status.innerHTML += renderDiagCard('Pressure', d.pressure, 'bar');
       if (d.flow_rate) status.innerHTML += renderDiagCard('DHW Flow Rate', d.flow_rate, 'L/min');
+      if (d.flame_on) {
+        const flameStatus = d.flame_on.value > 0.5 ? '🔥 ON' : 'OFF';
+        status.innerHTML += `
+          <div class="diag-card">
+            <div class="diag-label">Flame Status</div>
+            <span class="diag-value">${flameStatus}</span>
+            ${formatTimestamp(d.flame_on.age_ms)}
+          </div>
+        `;
+      }
+      if (d.ch_mode) {
+        const chStatus = d.ch_mode.value > 0.5 ? 'ACTIVE' : 'OFF';
+        status.innerHTML += `
+          <div class="diag-card">
+            <div class="diag-label">CH Mode</div>
+            <span class="diag-value">${chStatus}</span>
+            ${formatTimestamp(d.ch_mode.age_ms)}
+          </div>
+        `;
+      }
+      if (d.dhw_mode) {
+        const dhwStatus = d.dhw_mode.value > 0.5 ? 'ACTIVE' : 'OFF';
+        status.innerHTML += `
+          <div class="diag-card">
+            <div class="diag-label">DHW Mode</div>
+            <span class="diag-value">${dhwStatus}</span>
+            ${formatTimestamp(d.dhw_mode.age_ms)}
+          </div>
+        `;
+      }
 
       // Faults
       if (d.fault_code) faults.innerHTML += renderDiagCard('Fault Code', d.fault_code, '');
@@ -122,6 +152,9 @@ function updateDiagnostics() {
         { key: 'Modulation Level', val: d.modulation_level, unit: '%' },
         { key: 'Pressure', val: d.pressure, unit: 'bar' },
         { key: 'DHW Flow Rate', val: d.flow_rate, unit: 'L/min' },
+        { key: 'Flame Status', val: d.flame_on, unit: '', format: (v) => v > 0.5 ? '🔥 ON' : 'OFF' },
+        { key: 'CH Mode', val: d.ch_mode, unit: '', format: (v) => v > 0.5 ? 'ACTIVE' : 'OFF' },
+        { key: 'DHW Mode', val: d.dhw_mode, unit: '', format: (v) => v > 0.5 ? 'ACTIVE' : 'OFF' },
         { key: 'Fault Code', val: d.fault_code, unit: '' },
         { key: 'Diagnostic Code', val: d.diag_code, unit: '' },
         { key: 'Burner Starts', val: d.burner_starts, unit: '' },
@@ -145,7 +178,10 @@ function updateDiagnostics() {
         if (item.val && item.val.valid) {
           const row = allValues.insertRow();
           row.insertCell(0).textContent = item.key;
-          row.insertCell(1).textContent = `${item.val.value.toFixed(1)}${item.unit} (${formatAge(item.val.age_ms)})`;
+          const valueText = item.format 
+            ? `${item.format(item.val.value)} (${formatAge(item.val.age_ms)})`
+            : `${item.val.value.toFixed(1)}${item.unit} (${formatAge(item.val.age_ms)})`;
+          row.insertCell(1).textContent = valueText;
         }
       });
     })

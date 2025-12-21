@@ -142,6 +142,25 @@ public:
         return publishState(topic, buf);
     }
 
+    esp_err_t publishBinarySensor(std::string_view id, std::string_view name,
+                                   bool state, bool valid) {
+        if (!client_ || !state_.connected) {
+            return ESP_ERR_INVALID_STATE;
+        }
+
+        // Publish discovery
+        publishBinarySensorDiscovery(id, name);
+
+        // Build state topic
+        std::string topic = config_.baseTopic + "/diag/" + std::string(id) + "/state";
+
+        if (!valid) {
+            return publishState(topic, "");  // Clear value
+        }
+
+        return publishState(topic, state ? "ON" : "OFF");
+    }
+
     void setControlCallback(ControlModeCallback callback) {
         controlCallback_ = std::move(callback);
     }
@@ -295,6 +314,24 @@ private:
         publishState(topic, payload);
     }
 
+    void publishBinarySensorDiscovery(std::string_view id, std::string_view name) {
+        const std::string& disc = config_.discoveryPrefix.empty() ? "homeassistant" : config_.discoveryPrefix;
+        const std::string& base = config_.baseTopic.empty() ? "ot_gateway" : config_.baseTopic;
+
+        std::string topic = disc + "/binary_sensor/" + base + "_" + std::string(id) + "/config";
+        std::string stateTopic = base + "/diag/" + std::string(id) + "/state";
+
+        char payload[512];
+        snprintf(payload, sizeof(payload),
+            R"({"name":"%.*s","uniq_id":"%s_%.*s","stat_t":"%s","payload_on":"ON","payload_off":"OFF","retain":true,)"
+            R"("dev":{"ids":["%s"],"name":"OpenTherm Gateway","mf":"OT Gateway","mdl":"ESP32"}})",
+            static_cast<int>(name.size()), name.data(),
+            base.c_str(), static_cast<int>(id.size()), id.data(),
+            stateTopic.c_str(),
+            base.c_str());
+        publishState(topic, payload);
+    }
+
     void handleMessage(esp_mqtt_event_handle_t event) {
         if (!event || !event->topic || !event->data) {
             return;
@@ -412,6 +449,11 @@ MqttState MqttBridge::state() const {
 esp_err_t MqttBridge::publishSensor(std::string_view id, std::string_view name,
                                     std::string_view unit, float value, bool valid) {
     return impl_->publishSensor(id, name, unit, value, valid);
+}
+
+esp_err_t MqttBridge::publishBinarySensor(std::string_view id, std::string_view name,
+                                           bool state, bool valid) {
+    return impl_->publishBinarySensor(id, name, state, valid);
 }
 
 void MqttBridge::setControlCallback(ControlModeCallback callback) {

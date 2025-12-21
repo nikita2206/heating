@@ -89,6 +89,9 @@ struct Diagnostics {
     DiagnosticValue fanExhaustRpm;
     DiagnosticValue fanSupplyRpm;
     DiagnosticValue co2Exhaust;
+    DiagnosticValue flameOn;
+    DiagnosticValue chMode;
+    DiagnosticValue dhwMode;
 };
 
 // Status snapshot for external queries

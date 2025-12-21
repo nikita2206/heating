@@ -434,6 +434,26 @@ private:
         uint8_t uint8Val;
 
         switch (dataId) {
+            case 0:
+                // Status message - extract slave status flags (low byte)
+                {
+                    uint8_t slaveStatus = response.lowByte();
+                    // Bit 1: CH mode
+                    bool chActive = (slaveStatus & 0x02) != 0;
+                    diagnostics_.chMode.update(chActive ? 1.0f : 0.0f);
+                    publishBinaryDiag("ch_mode", "CH Mode", chActive);
+                    
+                    // Bit 2: DHW mode
+                    bool dhwActive = (slaveStatus & 0x04) != 0;
+                    diagnostics_.dhwMode.update(dhwActive ? 1.0f : 0.0f);
+                    publishBinaryDiag("dhw_mode", "DHW Mode", dhwActive);
+                    
+                    // Bit 3: Flame indicator
+                    bool flame = (slaveStatus & 0x08) != 0;
+                    diagnostics_.flameOn.update(flame ? 1.0f : 0.0f);
+                    publishBinaryDiag("flame", "Flame Status", flame);
+                }
+                break;
             case 25:
                 floatVal = response.asFloat();
                 diagnostics_.tBoiler.update(floatVal);
@@ -578,6 +598,12 @@ private:
     void publishDiag(const char* id, const char* name, const char* unit, const DiagnosticValue& dv) {
         if (mqttBridge_ && dv.isValid()) {
             mqttBridge_->publishSensor(id, name, unit, dv.valueOr(0.0f), true);
+        }
+    }
+
+    void publishBinaryDiag(const char* id, const char* name, bool state) {
+        if (mqttBridge_) {
+            mqttBridge_->publishBinarySensor(id, name, state, true);
         }
     }
 

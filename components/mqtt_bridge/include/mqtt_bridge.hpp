@@ -82,6 +82,10 @@ public:
     [[nodiscard]] esp_err_t publishSensor(std::string_view id, std::string_view name,
                                           std::string_view unit, float value, bool valid);
 
+    // Publish binary sensor value (ON/OFF) with Home Assistant discovery
+    [[nodiscard]] esp_err_t publishBinarySensor(std::string_view id, std::string_view name,
+                                                 bool state, bool valid);
+
     // Control mode callback
     void setControlCallback(ControlModeCallback callback);
 
