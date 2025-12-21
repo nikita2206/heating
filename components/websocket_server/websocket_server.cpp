@@ -53,7 +53,7 @@ static esp_err_t spa_handler(httpd_req_t* req) {
     return ESP_OK;
 }
 
-// Serve gzipped JS bundle
+// Serve gzipped JS bundle (handles wildcard URIs like /assets/index_*.js)
 static esp_err_t js_handler(httpd_req_t* req) {
     size_t len;
     const uint8_t* data = web_ui_get_index_js_gz(&len);
@@ -65,7 +65,7 @@ static esp_err_t js_handler(httpd_req_t* req) {
     return ESP_OK;
 }
 
-// Serve gzipped CSS bundle
+// Serve gzipped CSS bundle (handles wildcard URIs like /assets/index_*.css)
 static esp_err_t css_handler(httpd_req_t* req) {
     size_t len;
     const uint8_t* data = web_ui_get_index_css_gz(&len);
@@ -564,9 +564,9 @@ extern "C" esp_err_t websocket_server_start(websocket_server_t* ws_server,
         httpd_register_uri_handler(ws_server->server, &uri);
     }
 
-    // Register asset handlers
-    httpd_uri_t js_uri = { "/assets/index.js", HTTP_GET, js_handler, nullptr, false, false, nullptr };
-    httpd_uri_t css_uri = { "/assets/index.css", HTTP_GET, css_handler, nullptr, false, false, nullptr };
+    // Register asset handlers (wildcard patterns match content-hashed filenames)
+    httpd_uri_t js_uri = { "/assets/index_*.js", HTTP_GET, js_handler, nullptr, false, false, nullptr };
+    httpd_uri_t css_uri = { "/assets/index_*.css", HTTP_GET, css_handler, nullptr, false, false, nullptr };
     httpd_register_uri_handler(ws_server->server, &js_uri);
     httpd_register_uri_handler(ws_server->server, &css_uri);
 
