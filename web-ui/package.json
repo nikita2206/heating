@@ -1,0 +1,18 @@
+{
+  "name": "opentherm-gateway-ui",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build && node scripts/gzip.js",
+    "preview": "vite preview"
+  },
+  "devDependencies": {
+    "vite": "^5.4.11",
+    "terser": "^5.37.0",
+    "@fullhuman/postcss-purgecss": "^6.0.0",
+    "cssnano": "^7.0.6",
+    "postcss": "^8.4.49"
+  }
+}

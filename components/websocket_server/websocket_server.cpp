@@ -9,7 +9,6 @@
 
 extern "C" {
 #include "web_ui.h"
-#include "web_ui_pages.h"
 }
 
 #include "esp_log.h"
@@ -38,50 +37,49 @@ static void mqtt_control_mode_handler(bool enabled) {
     }
 }
 
-// HTTP GET handler for root (dashboard)
-static esp_err_t root_handler(httpd_req_t* req) {
+// ============================================================================
+// SPA File Handlers (gzipped)
+// ============================================================================
+
+// Serve gzipped index.html for all page routes (SPA routing)
+static esp_err_t spa_handler(httpd_req_t* req) {
+    size_t len;
+    const uint8_t* data = web_ui_get_index_html_gz(&len);
+
     httpd_resp_set_type(req, "text/html");
-    char nav[WEB_UI_NAV_MAX_LEN];
-    web_ui_build_nav(nav, sizeof(nav), WEB_NAV_DASHBOARD);
-    size_t page_len = 0;
-    char* page = web_ui_alloc_page(0, &page_len, "OpenTherm Gateway", WEB_UI_DASHBOARD_STYLES, nav, WEB_UI_DASHBOARD_BODY);
-    if (!page) {
-        return httpd_resp_send_500(req);
-    }
-    httpd_resp_send(req, page, page_len);
-    free(page);
+    httpd_resp_set_hdr(req, "Content-Encoding", "gzip");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-cache");
+    httpd_resp_send(req, reinterpret_cast<const char*>(data), len);
     return ESP_OK;
 }
 
-// HTTP GET handler for logs page
-static esp_err_t logs_handler(httpd_req_t* req) {
-    httpd_resp_set_type(req, "text/html");
-    char nav[WEB_UI_NAV_MAX_LEN];
-    web_ui_build_nav(nav, sizeof(nav), WEB_NAV_LOGS);
-    size_t page_len = 0;
-    char* page = web_ui_alloc_page(0, &page_len, "Logs - OpenTherm Gateway", WEB_UI_LOGS_STYLES, nav, WEB_UI_LOGS_BODY);
-    if (!page) {
-        return httpd_resp_send_500(req);
-    }
-    httpd_resp_send(req, page, page_len);
-    free(page);
+// Serve gzipped JS bundle
+static esp_err_t js_handler(httpd_req_t* req) {
+    size_t len;
+    const uint8_t* data = web_ui_get_index_js_gz(&len);
+
+    httpd_resp_set_type(req, "application/javascript");
+    httpd_resp_set_hdr(req, "Content-Encoding", "gzip");
+    httpd_resp_set_hdr(req, "Cache-Control", "max-age=31536000, immutable");
+    httpd_resp_send(req, reinterpret_cast<const char*>(data), len);
     return ESP_OK;
 }
 
-// HTTP GET handler for write page
-static esp_err_t write_handler(httpd_req_t* req) {
-    httpd_resp_set_type(req, "text/html");
-    char nav[WEB_UI_NAV_MAX_LEN];
-    web_ui_build_nav(nav, sizeof(nav), WEB_NAV_WRITE);
-    size_t page_len = 0;
-    char* page = web_ui_alloc_page(0, &page_len, "Manual Write - OpenTherm Gateway", WEB_UI_WRITE_STYLES, nav, WEB_UI_WRITE_BODY);
-    if (!page) {
-        return httpd_resp_send_500(req);
-    }
-    httpd_resp_send(req, page, page_len);
-    free(page);
+// Serve gzipped CSS bundle
+static esp_err_t css_handler(httpd_req_t* req) {
+    size_t len;
+    const uint8_t* data = web_ui_get_index_css_gz(&len);
+
+    httpd_resp_set_type(req, "text/css");
+    httpd_resp_set_hdr(req, "Content-Encoding", "gzip");
+    httpd_resp_set_hdr(req, "Cache-Control", "max-age=31536000, immutable");
+    httpd_resp_send(req, reinterpret_cast<const char*>(data), len);
     return ESP_OK;
 }
+
+// ============================================================================
+// API Handlers
+// ============================================================================
 
 // MQTT state API
 static esp_err_t mqtt_state_handler(httpd_req_t* req) {
@@ -265,36 +263,6 @@ static esp_err_t control_mode_post_handler(httpd_req_t* req) {
 
     httpd_resp_set_type(req, "application/json");
     httpd_resp_sendstr(req, "{\"status\":\"ok\"}");
-    return ESP_OK;
-}
-
-// HTTP GET handler for diagnostics page
-static esp_err_t diagnostics_handler(httpd_req_t* req) {
-    httpd_resp_set_type(req, "text/html");
-    char nav[WEB_UI_NAV_MAX_LEN];
-    web_ui_build_nav(nav, sizeof(nav), WEB_NAV_DIAGNOSTICS);
-    size_t page_len = 0;
-    char* page = web_ui_alloc_page(0, &page_len, "Diagnostics - OpenTherm Gateway", WEB_UI_DIAGNOSTICS_STYLES, nav, WEB_UI_DIAGNOSTICS_BODY);
-    if (!page) {
-        return httpd_resp_send_500(req);
-    }
-    httpd_resp_send(req, page, page_len);
-    free(page);
-    return ESP_OK;
-}
-
-// MQTT config page handler
-static esp_err_t mqtt_page_handler(httpd_req_t* req) {
-    httpd_resp_set_type(req, "text/html");
-    char nav[WEB_UI_NAV_MAX_LEN];
-    web_ui_build_nav(nav, sizeof(nav), WEB_NAV_MQTT);
-    size_t page_len = 0;
-    char* page = web_ui_alloc_page(0, &page_len, "MQTT - OpenTherm Gateway", WEB_UI_MQTT_STYLES, nav, WEB_UI_MQTT_BODY);
-    if (!page) {
-        return httpd_resp_send_500(req);
-    }
-    httpd_resp_send(req, page, page_len);
-    free(page);
     return ESP_OK;
 }
 
@@ -492,7 +460,10 @@ static esp_err_t diagnostics_api_handler(httpd_req_t* req) {
     return ret;
 }
 
-// WebSocket handler
+// ============================================================================
+// WebSocket Handler
+// ============================================================================
+
 static esp_err_t ws_handler(httpd_req_t* req) {
     if (req->method == HTTP_GET) {
         ESP_LOGI(TAG, "WebSocket handshake");
@@ -539,7 +510,9 @@ static void boiler_manager_message_handler(std::string_view direction,
                                             source_str);
 }
 
-// Public API - extern "C" for compatibility
+// ============================================================================
+// Public API
+// ============================================================================
 
 extern "C" esp_err_t websocket_server_start(websocket_server_t* ws_server,
                                              ot::BoilerManager* boiler_mgr) {
@@ -563,7 +536,7 @@ extern "C" esp_err_t websocket_server_start(websocket_server_t* ws_server,
 
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.max_open_sockets = 7;
-    config.max_uri_handlers = 16;
+    config.max_uri_handlers = 20;
     config.uri_match_fn = httpd_uri_match_wildcard;
     config.recv_wait_timeout = 30;
     config.send_wait_timeout = 30;
@@ -577,22 +550,26 @@ extern "C" esp_err_t websocket_server_start(websocket_server_t* ws_server,
         return ESP_FAIL;
     }
 
-    // Register all URI handlers
-    httpd_uri_t root_uri = { "/", HTTP_GET, root_handler, nullptr, false, false, nullptr };
-    httpd_register_uri_handler(ws_server->server, &root_uri);
+    // Register SPA handlers for all page routes
+    httpd_uri_t spa_routes[] = {
+        { "/", HTTP_GET, spa_handler, nullptr, false, false, nullptr },
+        { "/logs", HTTP_GET, spa_handler, nullptr, false, false, nullptr },
+        { "/diagnostics", HTTP_GET, spa_handler, nullptr, false, false, nullptr },
+        { "/mqtt", HTTP_GET, spa_handler, nullptr, false, false, nullptr },
+        { "/write", HTTP_GET, spa_handler, nullptr, false, false, nullptr },
+        { "/ota", HTTP_GET, spa_handler, nullptr, false, false, nullptr },
+    };
+    for (const auto& uri : spa_routes) {
+        httpd_register_uri_handler(ws_server->server, &uri);
+    }
 
-    httpd_uri_t logs_uri = { "/logs", HTTP_GET, logs_handler, nullptr, false, false, nullptr };
-    httpd_register_uri_handler(ws_server->server, &logs_uri);
+    // Register asset handlers
+    httpd_uri_t js_uri = { "/assets/index.js", HTTP_GET, js_handler, nullptr, false, false, nullptr };
+    httpd_uri_t css_uri = { "/assets/index.css", HTTP_GET, css_handler, nullptr, false, false, nullptr };
+    httpd_register_uri_handler(ws_server->server, &js_uri);
+    httpd_register_uri_handler(ws_server->server, &css_uri);
 
-    httpd_uri_t diagnostics_uri = { "/diagnostics", HTTP_GET, diagnostics_handler, nullptr, false, false, nullptr };
-    httpd_register_uri_handler(ws_server->server, &diagnostics_uri);
-
-    httpd_uri_t mqtt_uri = { "/mqtt", HTTP_GET, mqtt_page_handler, nullptr, false, false, nullptr };
-    httpd_register_uri_handler(ws_server->server, &mqtt_uri);
-
-    httpd_uri_t write_uri = { "/write", HTTP_GET, write_handler, nullptr, false, false, nullptr };
-    httpd_register_uri_handler(ws_server->server, &write_uri);
-
+    // Register API handlers
     httpd_uri_t diagnostics_api_uri = { "/api/diagnostics", HTTP_GET, diagnostics_api_handler, nullptr, false, false, nullptr };
     httpd_register_uri_handler(ws_server->server, &diagnostics_api_uri);
 

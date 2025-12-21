@@ -10,3 +10,7 @@ sdkconfig.old
 # ESP-IDF Component Manager generated files
 managed_components/
 dependencies.lock
+
+# Web UI build artifacts
+web-ui/node_modules/
+web-ui/dist/
