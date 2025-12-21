@@ -2,6 +2,9 @@
 #include <iostream>
 #include <cstdint>
 
+// Since I was not able to quickly find a way to test an actual RMT implementation of OpenTherm (in the `ot` component), 
+// I am using this file where I copy and paste the part of the code that does the decoding and test it externally.
+
 constexpr uint64_t STATE_BIT = 1ULL << 63;
 constexpr uint64_t DUR_MASK  = ~STATE_BIT;
 

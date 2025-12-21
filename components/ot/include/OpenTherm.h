@@ -233,6 +233,15 @@ public:
     float getPressure();
     unsigned char getFault();
 
+    // Debug/data collection
+    // Enable detailed RMT symbol logging for test data collection.
+    // When enabled, logs all RMT symbols with parsed frame result (success or failure).
+    // Output format: "B RMT[n] -> 0x12345678: L500,H500,..." (success)
+    //            or: "B RMT[n] FAILED (reason): L500,H500,..." (error)
+    // Use this to collect test cases for parseRMTSymbols validation.
+    void setRMTDebugLogging(bool enable) { rmtDebugLogging_ = enable; }
+    bool getRMTDebugLogging() const { return rmtDebugLogging_; }
+
 
     void monitorInterrupts();
 
@@ -245,6 +254,7 @@ private:
     void startRMTReceive();
     void stopRMTReceive();
     uint32_t parseRMTSymbols(rmt_symbol_word_t* symbols, size_t num_symbols);
+    void buildRMTSymbolLogString(rmt_symbol_word_t* symbols, size_t num_symbols, char* buffer, size_t bufferSize);
     size_t encodeFrameToRMT(unsigned long frame, rmt_symbol_word_t* symbols);
     bool sendFrameRMT(unsigned long frame);
     const gpio_num_t inPin;
@@ -257,6 +267,7 @@ private:
     volatile unsigned long responseTimestamp;
 
     TaskHandle_t monitorTaskHandle_;
+    bool rmtDebugLogging_;  // Flag to enable verbose RMT symbol logging
 
     // RMT-related members
     rmt_channel_handle_t rmtChannel_;      // RX channel

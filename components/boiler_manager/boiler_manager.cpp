@@ -102,6 +102,9 @@ public:
         boiler_ = std::make_unique<OpenTherm>(
             config_.boilerInPin, config_.boilerOutPin, false,
             config_.boilerInvertOutput);
+        
+        thermostat_->setRMTDebugLogging(true);
+        boiler_->setRMTDebugLogging(true);
 
         // Initialize OpenTherm instances
         thermostat_->begin();

@@ -50,6 +50,7 @@ OpenTherm::OpenTherm(gpio_num_t inPin, gpio_num_t outPin, bool isSlave, bool inv
     responseStatus(OpenThermResponseStatus::NONE),
     responseTimestamp(0),
     monitorTaskHandle_(nullptr),
+    rmtDebugLogging_(false),
     rmtChannel_(nullptr),
     rmtTxChannel_(nullptr),
     rmtCopyEncoder_(nullptr),
@@ -94,7 +95,7 @@ void OpenTherm::begin()
     BaseType_t ret = xTaskCreatePinnedToCore(
         monitorTaskEntry,
         "ot_rmt_monitor",
-        8192, // Stack size (bytes) - parseRMTSymbols needs ~3KB for log buffer
+        4096, // Stack size (bytes) - reduced from 8192 (parseRMTSymbols now uses ~512B for error logs)
         this,
         configMAX_PRIORITIES - 1, // High priority
         &monitorTaskHandle_,
@@ -733,26 +734,26 @@ unsigned char OpenTherm::getFault()
     return ((sendRequest(buildRequest(OpenThermRequestType::READ, OpenThermMessageID::ASFflags, 0)) >> 8) & 0xff);
 }
 
-uint32_t OpenTherm::parseRMTSymbols(rmt_symbol_word_t* symbols, size_t num_symbols)
+void OpenTherm::buildRMTSymbolLogString(rmt_symbol_word_t* symbols, size_t num_symbols, char* buffer, size_t bufferSize)
 {
-    // Log RMT symbols in compact form: "L:dur,H:dur,..." (L=low, H=high)
     // Build a compact string showing level and duration for each symbol part
-    // Each entry can be up to ~10 chars (e.g. ",H900000"), 128 symbols × 2 parts max = ~2560 bytes
-    char logBuf[3072];
+    // Format: "L:dur,H:dur,..." (L=low, H=high)
     int logPos = 0;
-    for (size_t i = 0; i < num_symbols && logPos < (int)sizeof(logBuf) - 12; i++) {
+    for (size_t i = 0; i < num_symbols && logPos < (int)bufferSize - 12; i++) {
         rmt_symbol_word_t symbol = symbols[i];
         // Log both parts of each symbol
-        for (int part = 0; part < 2 && logPos < (int)sizeof(logBuf) - 12; part++) {
+        for (int part = 0; part < 2 && logPos < (int)bufferSize - 12; part++) {
             uint32_t dur = (part == 0) ? symbol.duration0 : symbol.duration1;
             uint32_t level = (part == 0) ? symbol.level0 : symbol.level1;
-            int written = snprintf(logBuf + logPos, sizeof(logBuf) - logPos,
+            int written = snprintf(buffer + logPos, bufferSize - logPos,
                                    "%s%c%lu", (i > 0 || part > 0 ? "," : ""), (level ? 'H' : 'L'), (unsigned long)dur);
             if (written > 0) logPos += written;
         }
     }
-    // ESP_LOGI("OT", "%s RMT[%d]: %s", isSlave ? "T" : "B", num_symbols, logBuf);
+}
 
+uint32_t OpenTherm::parseRMTSymbols(rmt_symbol_word_t* symbols, size_t num_symbols)
+{
     // Manchester decoding for OpenTherm using RMT symbols
     // Each RMT symbol represents a pulse: level0 for duration0, then level1 for duration1
     // For Manchester: bit '1' = high->low, bit '0' = low->high
@@ -762,6 +763,19 @@ uint32_t OpenTherm::parseRMTSymbols(rmt_symbol_word_t* symbols, size_t num_symbo
     constexpr int ONE_MAX = 700;      // Maximum half-bit duration
     constexpr int TWO_MIN = 700;      // Minimum 2 half-bits
     constexpr int TWO_MAX = 1300;     // Maximum 2 half-bits
+
+    // Helper to build and log RMT symbols (for errors or debug mode)
+    auto logRMTSymbols = [&](const char* status, uint32_t frame = 0) {
+        if (rmtDebugLogging_ || frame == 0) {  // Always log on error (frame==0), or when debug enabled
+            char logBuf[512];
+            buildRMTSymbolLogString(symbols, num_symbols, logBuf, sizeof(logBuf));
+            if (frame != 0) {
+                ESP_LOGI("OT", "%s RMT[%d] -> 0x%08lx: %s", isSlave ? "T" : "B", num_symbols, frame, logBuf);
+            } else {
+                ESP_LOGW("OT", "%s RMT[%d] FAILED (%s): %s", isSlave ? "T" : "B", num_symbols, status, logBuf);
+            }
+        }
+    };
 
     // We expect 68 half-bits for a complete frame (1 start + 32 data + 1 stop bits × 2)
     bool halfLevels[68];
@@ -813,7 +827,9 @@ uint32_t OpenTherm::parseRMTSymbols(rmt_symbol_word_t* symbols, size_t num_symbo
             } else if (dur >= TWO_MIN && dur <= TWO_MAX) {
                 halves = 2;
             } else {
-                ESP_LOGW("OT", "RMT Invalid duration: %lu μs for symbol %d FRAME: %s", dur, i, logBuf);
+                char errorMsg[64];
+                snprintf(errorMsg, sizeof(errorMsg), "Invalid duration %lu μs at symbol %zu", dur, i);
+                logRMTSymbols(errorMsg);
                 return 0;  // Invalid frame
             }
 
@@ -832,7 +848,9 @@ uint32_t OpenTherm::parseRMTSymbols(rmt_symbol_word_t* symbols, size_t num_symbo
 
     // We need exactly 68 half-bits for a complete frame
     if (halfCount != 68) {
-        ESP_LOGW("OT", "RMT Half count mismatch: %d (expected 68) FRAME: %s", halfCount, logBuf);
+        char errorMsg[64];
+        snprintf(errorMsg, sizeof(errorMsg), "Half count %d (expected 68)", halfCount);
+        logRMTSymbols(errorMsg);
         return 0;
     }
 
@@ -843,7 +861,9 @@ uint32_t OpenTherm::parseRMTSymbols(rmt_symbol_word_t* symbols, size_t num_symbo
         bool c = halfLevels[2 * b + 1]; // Second half-bit
 
         if (a == c) {
-            ESP_LOGW("OT", "RMT Invalid Manchester (no transition): %d FRAME: %s", b, logBuf);
+            char errorMsg[64];
+            snprintf(errorMsg, sizeof(errorMsg), "Manchester no transition at bit %d", b);
+            logRMTSymbols(errorMsg);
             return 0;
         }
 
@@ -851,18 +871,24 @@ uint32_t OpenTherm::parseRMTSymbols(rmt_symbol_word_t* symbols, size_t num_symbo
         if (a == 1 && c == 0) bits[b] = 1;      // Falling edge = '1'
         else if (a == 0 && c == 1) bits[b] = 0; // Rising edge = '0'
         else {
-            ESP_LOGW("OT", "RMT Invalid Manchester (wrong transition): %d FRAME: %s", b, logBuf);
+            char errorMsg[64];
+            snprintf(errorMsg, sizeof(errorMsg), "Manchester wrong transition at bit %d", b);
+            logRMTSymbols(errorMsg);
             return 0;
         }
     }
 
     // Start and stop bits must be '1'
     if (bits[0] != 1) {
-        ESP_LOGW("OT", "RMT Invalid start bit: %d FRAME: %s", bits[0], logBuf);
+        char errorMsg[64];
+        snprintf(errorMsg, sizeof(errorMsg), "Invalid start bit: %d", bits[0]);
+        logRMTSymbols(errorMsg);
         return 0;
     }
     if (bits[33] != 1) {
-        ESP_LOGW("OT", "RMT Invalid stop bit: %d FRAME: %s", bits[33], logBuf);
+        char errorMsg[64];
+        snprintf(errorMsg, sizeof(errorMsg), "Invalid stop bit: %d", bits[33]);
+        logRMTSymbols(errorMsg);
         return 0;
     }
 
@@ -874,9 +900,14 @@ uint32_t OpenTherm::parseRMTSymbols(rmt_symbol_word_t* symbols, size_t num_symbo
 
     // Even parity check on the 32 bits
     if (__builtin_popcount(frame) & 1) {
-        ESP_LOGW("OT", "RMT Invalid parity: %d ones FRAME: %s", __builtin_popcount(frame), logBuf);
+        char errorMsg[64];
+        snprintf(errorMsg, sizeof(errorMsg), "Invalid parity (%d ones)", __builtin_popcount(frame));
+        logRMTSymbols(errorMsg);
         return 0;
     }
+
+    // Log successful parse if debug logging is enabled
+    logRMTSymbols("SUCCESS", frame);
 
     return frame;
 }
