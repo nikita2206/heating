@@ -17,8 +17,8 @@ CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
 #
 # WiFi Configuration
 #
-CONFIG_ESP_WIFI_SSID="pomestye"
-CONFIG_ESP_WIFI_PASSWORD="cMepTbMycopaM"
+CONFIG_ESP_WIFI_SSID="wifi-name"
+CONFIG_ESP_WIFI_PASSWORD="wifi-password"
 
 #
 # ESP System Settings
