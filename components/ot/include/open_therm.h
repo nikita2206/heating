@@ -1,17 +1,7 @@
-/*
-open_therm.h - OpenTherm Library for ESP-IDF
-https://github.com/ihormelnyk/OpenTherm
-Licensed under MIT license
-Copyright 2023, Ihor Melnyk
-ESP-IDF port
 
-Frame Structure:
-P MGS-TYPE SPARE DATA-ID  DATA-VALUE
-0 000      0000  00000000 00000000 00000000
-*/
 
-#ifndef OpenTherm_h
-#define OpenTherm_h
+#ifndef OPEN_THERM_H
+#define OPEN_THERM_H
 
 #include <stdint.h>
 #include <functional>
