@@ -2,7 +2,7 @@
  * Logs page - Real-time OpenTherm message monitor
  */
 
-import { decodeFrame } from '../lib/opentherm.js';
+import { ID_DECODERS, fmtHex } from '../lib/opentherm.js';
 
 let ws = null;
 let logsContainer = null;
@@ -54,6 +54,28 @@ function passesFilter(d) {
   return true;
 }
 
+function formatMessage(d) {
+  // Use the pre-parsed data from the websocket instead of re-parsing
+  const msgType = d.msg_type || 'UNKNOWN';
+  const dataId = d.data_id;
+  const dataValue = d.data_value;
+
+  // Decode the payload using the ID decoder if available
+  const decoder = ID_DECODERS[dataId];
+  let payload, idName;
+  if (decoder) {
+    payload = decoder.decode(dataValue);
+    idName = decoder.name;
+  } else {
+    const hb = (dataValue >> 8) & 0xFF;
+    const lb = dataValue & 0xFF;
+    payload = `DATA-VALUE=${fmtHex(dataValue, 4)} (HB=${fmtHex(hb, 2)}, LB=${fmtHex(lb, 2)})`;
+    idName = 'Unknown/Unimplemented';
+  }
+
+  return `${msgType} (id=${dataId} ${idName}) ${payload}`;
+}
+
 function appendLogEntry(d) {
   if (!logsContainer) return;
 
@@ -64,7 +86,7 @@ function appendLogEntry(d) {
 
   div.className = `log-entry ${(d.direction || '').toLowerCase()} ${src}`;
 
-  const decodedContent = decodeFrame(d.message, d.direction);
+  const decodedContent = formatMessage(d);
 
   div.innerHTML = `
     <span class="log-time">${ts}</span>
