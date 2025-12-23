@@ -355,17 +355,6 @@ private:
                 if (status == OpenThermResponseStatus::TIMEOUT) {
                     // Don't log timeouts - they're normal when no data
                     return;
-
-                    validFrames++;
-
-                    if (status != OpenThermResponseStatus::SUCCESS) {
-                        Frame reqFrame(request);
-                        ESP_LOGW(TAG, "Thermostat frame %s: ID=%d type=%s raw=0x%08lX",
-                                OpenTherm::statusToString(status), reqFrame.dataId(),
-                                toString(reqFrame.messageType()), request);
-                        return;
-                    }
-
                 }
 
                 Frame reqFrame(request);
@@ -374,12 +363,12 @@ private:
 
                 int64_t t0 = esp_timer_get_time();
 
-                if (false && (loopCount % 15 == 0 || request == 0 || status == OpenThermResponseStatus::INVALID || dataId == 0)) {
+                if (status == OpenThermResponseStatus::INVALID) {
+                    invalidFrames++;
                     logMessage("DISCARDED_REQUEST", MessageSource::ThermostatBoiler, reqFrame);
-                    request = boiler_->buildSetBoilerStatusRequest(true, true, false, false, false);
-                    ESP_LOGI(TAG, "Swapping boiler request to Status frame: 0x%08lX", request);
-                    logMessage("REQUEST", MessageSource::GatewayBoiler, Frame(request));
+                    return;
                 } else {
+                    validFrames++;
                     Frame reqFrame(request);
                     ESP_LOGI(TAG, "Forwarding ID=%d request 0x%08lX to boiler", reqFrame.dataId(), request);
                     logMessage("REQUEST", MessageSource::ThermostatBoiler, reqFrame);
