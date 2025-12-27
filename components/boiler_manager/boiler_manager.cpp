@@ -196,6 +196,8 @@ private:
                 continue;
             }
 
+            logMessage("REQUEST", MessageSource::ThermostatBoiler, thermostatRequest.frame);
+
             if (thermostatRequest.status != OpenThermResponseStatus::SUCCESS) {
                 invalidFrames++;
                 ESP_LOGW(TAG, "Thermostat frame invalid: 0x%08lX", thermostatRequest.frame);
