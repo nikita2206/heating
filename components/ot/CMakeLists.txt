@@ -1,5 +1,5 @@
 idf_component_register(
-    SRCS "open_therm.cpp" "rmt_encoder.cpp"
+    SRCS "open_therm.cpp" "rmt_encoder.cpp" "opentherm_drv.cpp"
     INCLUDE_DIRS "include" "."
     REQUIRES driver esp_timer freertos
 )
