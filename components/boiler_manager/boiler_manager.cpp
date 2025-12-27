@@ -213,7 +213,7 @@ private:
                 continue;
             }
 
-            auto boilerResponse = boiler_->waitForFrame(100);
+            auto boilerResponse = boiler_->waitForFrame(250);
             if (boilerResponse.status != OpenThermResponseStatus::SUCCESS) {
                 invalidFrames++;
                 ESP_LOGW(TAG, "Couldn't get response from boiler, got status %s", OpenTherm::statusToString(boilerResponse.status));
