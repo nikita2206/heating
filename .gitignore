@@ -3,6 +3,8 @@ build/
 sdkconfig
 sdkconfig.old
 
+.cache
+
 .DS_Store
 
 .vscode

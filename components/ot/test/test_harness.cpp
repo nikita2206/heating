@@ -8,7 +8,7 @@
 // Disable ESP_PLATFORM for standalone mode
 #undef ESP_PLATFORM
 
-#include "../rmt_parser.h"
+#include "../rmt_encoder.h"
 
 /**
  * Parse simple symbol format: "level0,dur0,level1,dur1;level0,dur0,level1,dur1;..."
@@ -95,11 +95,11 @@ int main(int argc, char* argv[]) {
     
     // Build debug log string
     char logBuf[512];
-    ot::buildRMTSymbolLogString(symbols, num_symbols, logBuf, sizeof(logBuf));
+    ot::rmtSymbolsToString(symbols, num_symbols, logBuf, sizeof(logBuf));
     fprintf(stdout, "RMT symbols: %s\n", logBuf);
     
     // Run parser (this will also produce ESP_LOGI/LOGW output via mocks)
-    uint32_t result = ot::parseRMTSymbols(symbols, num_symbols, false);
+    uint32_t result = ot::decodeRmtAsOpenTherm(symbols, num_symbols, false);
     
     // Print result on last line (Python will parse this)
     printf("RESULT: 0x%08x\n", result);

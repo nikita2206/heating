@@ -1,6 +1,6 @@
 
 #include "open_therm.h"
-#include "rmt_parser.h"
+#include "rmt_encoder.h"
 #include "driver/gpio.h"
 #include "esp_timer.h"
 #include "esp_log.h"
@@ -36,12 +36,11 @@ bool IRAM_ATTR on_rmt_rx_done(rmt_channel_handle_t rx_chan, const rmt_rx_done_ev
     return high_task_wakeup == pdTRUE;
 }
 
-OpenTherm::OpenTherm(gpio_num_t inPin, gpio_num_t outPin, bool isSlave, bool invertOutput) :
+OpenTherm::OpenTherm(gpio_num_t inPin, gpio_num_t outPin, bool isSlave) :
     status(OpenThermStatus::NOT_INITIALIZED),
     inPin(inPin),
     outPin(outPin),
     isSlave(isSlave),
-    invertOutput(invertOutput),
     response(0),
     responseStatus(OpenThermResponseStatus::NONE),
     responseTimestamp(0),
@@ -70,7 +69,7 @@ void OpenTherm::begin()
         .intr_type = GPIO_INTR_DISABLE,
     };
     gpio_config(&out_conf);
-    gpio_set_level(outPin, invertOutput ? 0 : 1);  // Set idle level
+    gpio_set_level(outPin, 1);  // Set idle level
     vTaskDelay(pdMS_TO_TICKS(1000));  // Wait for boiler to recognize idle state
 
     // Configure input pin for RMT (no internal pull-up - OpenTherm interface has its own)
@@ -161,7 +160,7 @@ void OpenTherm::initRMTTx()
     ESP_ERROR_CHECK(rmt_enable(rmtTxChannel_));
     ESP_LOGI("OpenTherm", "RMT TX channel enabled");
 
-    // Set idle level to match idle state (inverted if invertOutput is set)
+    // Set idle level to match idle state
     // Note: RMT idle level is set per-transmission via transmit config
 }
 
@@ -193,50 +192,7 @@ void OpenTherm::stopRMTReceive()
 
 size_t OpenTherm::encodeFrameToRMT(unsigned long frame, rmt_symbol_word_t* symbols)
 {
-    // OpenTherm Manchester encoding:
-    // Bit '1' = HIGH for 500μs, then LOW for 500μs (falling edge in middle)
-    // Bit '0' = LOW for 500μs, then HIGH for 500μs (rising edge in middle)
-    // Frame: Start bit (1) + 32 data bits (MSB first) + Stop bit (1) = 34 bits
-
-    constexpr uint32_t HALF_BIT_US = 500;  // 500μs per half-bit
-
-    // Determine actual levels based on invertOutput
-    // Normal: active=LOW (0), idle=HIGH (1) for OpenTherm interface
-    // With invertOutput: active=HIGH (1), idle=LOW (0)
-    const uint32_t activeLevel = invertOutput ? 1 : 0;
-    const uint32_t idleLevel = invertOutput ? 0 : 1;
-
-    size_t symbolIdx = 0;
-
-    // Encode 34 bits: start (1) + 32 data bits + stop (1)
-    // Build the full 34-bit sequence
-    uint64_t fullFrame = 0;
-    fullFrame |= (1ULL << 33);                    // Start bit (bit 33)
-    fullFrame |= ((uint64_t)frame << 1);          // Data bits (bits 32-1)
-    fullFrame |= 1ULL;                             // Stop bit (bit 0)
-
-    for (int i = 33; i >= 0; i--) {
-        bool bit = (fullFrame >> i) & 1;
-
-        if (bit) {
-            // Bit '1': active->idle (HIGH then LOW normally, but inverted per interface)
-            // OpenTherm: '1' = high-to-low transition in middle of bit period
-            symbols[symbolIdx].level0 = activeLevel;
-            symbols[symbolIdx].duration0 = HALF_BIT_US;
-            symbols[symbolIdx].level1 = idleLevel;
-            symbols[symbolIdx].duration1 = HALF_BIT_US;
-        } else {
-            // Bit '0': idle->active (LOW then HIGH normally)
-            // OpenTherm: '0' = low-to-high transition in middle of bit period
-            symbols[symbolIdx].level0 = idleLevel;
-            symbols[symbolIdx].duration0 = HALF_BIT_US;
-            symbols[symbolIdx].level1 = activeLevel;
-            symbols[symbolIdx].duration1 = HALF_BIT_US;
-        }
-        symbolIdx++;
-    }
-
-    return symbolIdx;  // Should be 34
+    return ot::encodeOpenThermAsRmt(frame, symbols);
 }
 
 bool OpenTherm::sendFrameRMT(unsigned long frame)
@@ -253,7 +209,7 @@ bool OpenTherm::sendFrameRMT(unsigned long frame)
     rmt_transmit_config_t tx_config = {
         .loop_count = 0,  // No looping
         .flags = {
-            .eot_level = static_cast<uint32_t>(invertOutput ? 0 : 1),  // Idle level after transmission
+            .eot_level = 1,  // Idle level after transmission
         },
     };
 
@@ -319,6 +275,27 @@ unsigned long OpenTherm::sendRequest(unsigned long request)
         taskYIELD();
     }
     return response;
+}
+
+bool OpenTherm::sendRequestAsync(Frame frame)
+{
+    return sendRequestAsync(frame.raw());
+}
+
+ReceivedFrame OpenTherm::sendRequest(Frame frame)
+{
+    if (!sendRequestAsync(frame))
+    {
+        return ReceivedFrame(0, OpenThermResponseStatus::NONE, esp_timer_get_time());
+    }
+
+    while (!isReady())
+    {
+        process();
+        taskYIELD();
+    }
+    
+    return ReceivedFrame(response, responseStatus, responseTimestamp);
 }
 
 bool OpenTherm::sendResponse(unsigned long request)
@@ -451,6 +428,91 @@ unsigned long OpenTherm::process(std::function<void(unsigned long, OpenThermResp
         }
     }
     return 0;
+}
+
+ReceivedFrame OpenTherm::waitForFrame(uint32_t timeoutMs)
+{
+    uint64_t startTime = esp_timer_get_time();
+    uint64_t timeoutUs = (uint64_t)timeoutMs * 1000;
+    
+    while (true) {
+        uint64_t currentTime = esp_timer_get_time();
+        
+        // Check for timeout
+        if ((currentTime - startTime) >= timeoutUs) {
+            return ReceivedFrame(0, OpenThermResponseStatus::TIMEOUT, currentTime);
+        }
+        
+        // Check current status
+        OpenThermStatus st = status;
+        
+        // Frame is ready (either valid or invalid)
+        if (st == OpenThermStatus::RESPONSE_READY) {
+            unsigned long frame = response;
+            uint64_t ts = responseTimestamp;
+            
+            // Validate based on mode: slave expects requests, master expects responses
+            bool valid = isSlave ? isValidRequest(frame, isSlave) : isValidResponse(frame, isSlave);
+            OpenThermResponseStatus frameStatus = valid ? OpenThermResponseStatus::SUCCESS : OpenThermResponseStatus::INVALID;
+            
+            // Transition to DELAY state (similar to process())
+            status = OpenThermStatus::DELAY;
+            responseStatus = frameStatus;
+            
+            return ReceivedFrame(frame, frameStatus, ts);
+        }
+        
+        // Frame parsing failed
+        if (st == OpenThermStatus::RESPONSE_INVALID) {
+            unsigned long frame = response;
+            uint64_t ts = responseTimestamp;
+            
+            // Transition to DELAY state
+            status = OpenThermStatus::DELAY;
+            responseStatus = OpenThermResponseStatus::INVALID;
+            
+            return ReceivedFrame(frame, OpenThermResponseStatus::INVALID, ts);
+        }
+        
+        // Check if we've been waiting too long (1 second internal timeout)
+        if (st != OpenThermStatus::NOT_INITIALIZED && st != OpenThermStatus::DELAY && st != OpenThermStatus::READY) {
+            uint64_t elapsed = currentTime - responseTimestamp;
+            if (elapsed > 1000000) {  // 1 second
+                status = OpenThermStatus::READY;
+                responseStatus = OpenThermResponseStatus::TIMEOUT;
+                return ReceivedFrame(response, OpenThermResponseStatus::TIMEOUT, currentTime);
+            }
+        }
+        
+        // Handle DELAY state transition
+        if (st == OpenThermStatus::DELAY) {
+            uint64_t elapsed = currentTime - responseTimestamp;
+            if (elapsed > (isSlave ? 20000 : 100000)) {
+                status = OpenThermStatus::READY;
+            }
+        }
+        
+        // Small delay to avoid busy-waiting
+        vTaskDelay(pdMS_TO_TICKS(1));
+    }
+}
+
+OpenThermResponseStatus OpenTherm::sendFrame(Frame frame)
+{
+    status = OpenThermStatus::REQUEST_SENDING;
+    response = 0;
+    responseStatus = OpenThermResponseStatus::NONE;
+
+    // Use RMT for hardware-timed transmission
+    if (!sendFrameRMT(frame.raw())) {
+        status = OpenThermStatus::READY;
+        return OpenThermResponseStatus::INVALID;
+    }
+
+    status = OpenThermStatus::READY;
+    responseTimestamp = esp_timer_get_time();
+
+    return OpenThermResponseStatus::SUCCESS;
 }
 
 bool OpenTherm::parity(unsigned long frame) // odd parity
@@ -733,13 +795,13 @@ unsigned char OpenTherm::getFault()
 void OpenTherm::buildRMTSymbolLogString(rmt_symbol_word_t* symbols, size_t num_symbols, char* buffer, size_t bufferSize)
 {
     // Delegate to standalone implementation
-    ot::buildRMTSymbolLogString(symbols, num_symbols, buffer, bufferSize);
+    ot::rmtSymbolsToString(symbols, num_symbols, buffer, bufferSize);
 }
 
 uint32_t OpenTherm::parseRMTSymbols(rmt_symbol_word_t* symbols, size_t num_symbols)
 {
     // Parse using standalone implementation
-    uint32_t frame = ot::parseRMTSymbols(symbols, num_symbols, isSlave);
+    uint32_t frame = ot::decodeRmtAsOpenTherm(symbols, num_symbols, isSlave);
     
     // Add logging wrapper for debug mode
     if (rmtDebugLogging_ || frame == 0) {

@@ -124,12 +124,6 @@ struct ManagerConfig {
     gpio_num_t thermostatOutPin = GPIO_NUM_17;
     gpio_num_t boilerInPin = GPIO_NUM_18;
     gpio_num_t boilerOutPin = GPIO_NUM_19;
-
-    // Signal polarity inversion (depends on optocoupler circuit)
-    bool thermostatInvertOutput = false;
-    bool thermostatInvertInput = false;
-    bool boilerInvertOutput = false;
-    bool boilerInvertInput = false;
 };
 
 /**

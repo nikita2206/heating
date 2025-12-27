@@ -1,6 +1,6 @@
-# RMT Parser Regression Tests
+# RMT Encoder Regression Tests
 
-Tests the OpenTherm RMT symbol parser using real-world data captured from ESP32.
+Tests the OpenTherm RMT symbol parser/encoder using real-world data captured from ESP32.
 
 ## Quick Start
 
@@ -16,7 +16,7 @@ ot.setRMTDebugLogging(true);  // Logs: I (time) OT: T/B RMT[n] -> 0xHEX: H520,L4
 
 ## Architecture
 
-- **`../rmt_parser.{h,cpp}`** - Production parser code (single source of truth)
+- **`../rmt_encoder.{h,cpp}`** - Production parser/encoder code (single source of truth)
 - **`test_harness.cpp`** - Minimal C++ runner (~100 lines)
   - Accepts CLI arg: `level0,dur0,level1,dur1;...`
   - Calls production parser

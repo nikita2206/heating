@@ -66,23 +66,6 @@ enum class LoopState {
     WaitDiagResponse
 };
 
-// Helper to convert float to f8.8 format
-static uint16_t floatToF88(float val) {
-    if (val < 0) val = 0;
-    if (val > 250.0f) val = 250.0f;
-    return static_cast<uint16_t>(val * 256.0f);
-}
-
-// Helper to build status word
-static uint16_t buildStatusWord(bool chOn) {
-    uint16_t status = 0;
-    if (chOn) {
-        status |= (1 << 0);  // CH enable
-        status |= (1 << 1);  // DHW enable
-    }
-    return status;
-}
-
 class BoilerManager::Impl {
 public:
     explicit Impl(const ManagerConfig& config)
@@ -97,11 +80,9 @@ public:
     esp_err_t start() {
         // Create OpenTherm instances with configured pins
         thermostat_ = std::make_unique<OpenTherm>(
-            config_.thermostatInPin, config_.thermostatOutPin, true,
-            config_.thermostatInvertOutput);
+            config_.thermostatInPin, config_.thermostatOutPin, true);
         boiler_ = std::make_unique<OpenTherm>(
-            config_.boilerInPin, config_.boilerOutPin, false,
-            config_.boilerInvertOutput);
+            config_.boilerInPin, config_.boilerOutPin, false);
 
         // Initialize OpenTherm instances
         thermostat_->begin();
@@ -124,9 +105,6 @@ public:
         }
 
         ESP_LOGI(TAG, "Main loop started in %s mode", toString(config_.mode));
-        ESP_LOGI(TAG, "Thermostat: invertOut=%d invertIn=%d, Boiler: invertOut=%d invertIn=%d",
-                 config_.thermostatInvertOutput, config_.thermostatInvertInput,
-                 config_.boilerInvertOutput, config_.boilerInvertInput);
         return ESP_OK;
     }
 
@@ -195,153 +173,6 @@ private:
         vTaskDelete(nullptr);
     }
 
-    // void taskFunction() {
-    //     ESP_LOGI(TAG, "Main loop task started");
-
-    //     while (running_.load()) {
-    //         int64_t nowMs = esp_timer_get_time() / 1000;
-
-    //         // 1. Check for new thermostat request
-    //         Frame request;
-    //         if (ThermostatTask::getRequest(*queues_, request)) {
-    //             ESP_LOGD(TAG, "Got thermostat request: 0x%08lX",
-    //                      static_cast<unsigned long>(request.raw()));
-    //             logMessage("REQUEST", MessageSource::ThermostatBoiler, request);
-
-    //             uint8_t dataId = request.dataId();
-
-    //             // Refresh MQTT control state
-    //             if (controlEnabled_) {
-    //                 refreshControlState();
-    //             }
-
-    //             // CONTROL MODE: send synthetic responses
-    //             if (controlEnabled_ && controlActive_) {
-    //                 auto syntheticResponse = handleControlMode(dataId);
-    //                 if (syntheticResponse) {
-    //                     logMessage("RESPONSE", MessageSource::ThermostatGateway, *syntheticResponse);
-    //                     ThermostatTask::sendResponse(*queues_, *syntheticResponse);
-    //                     continue;
-    //                 }
-    //             }
-
-    //             // DIAGNOSTIC INJECTION: Intercept every Nth ID=0 request
-    //             if (dataId == DataId::Status && config_.mode == ManagerMode::Proxy) {
-    //                 id0FrameCounter_++;
-    //                 if (id0FrameCounter_ >= config_.interceptRate) {
-    //                     id0FrameCounter_ = 0;
-
-    //                     // Send diagnostic query instead
-    //                     const auto& cmd = DIAG_COMMANDS[diagIndex_];
-    //                     diagIndex_ = (diagIndex_ + 1) % DIAG_COMMANDS_COUNT;
-
-    //                     Frame diagRequest = Frame::buildRequest(MessageType::ReadData, cmd.dataId, 0);
-    //                     ESP_LOGI(TAG, "Intercepting for diagnostic: %s (ID=%d)", cmd.name, cmd.dataId);
-    //                     logMessage("REQUEST", MessageSource::GatewayBoiler, diagRequest);
-
-    //                     BoilerTask::sendRequest(*queues_, diagRequest);
-    //                     loopState_ = LoopState::WaitDiagResponse;
-    //                     pendingRequest_ = request;
-    //                     continue;
-    //                 }
-    //             }
-
-    //             // NORMAL PASSTHROUGH: Forward request to boiler
-    //             ESP_LOGD(TAG, "Forwarding request to boiler");
-    //             BoilerTask::sendRequest(*queues_, request);
-    //             loopState_ = LoopState::WaitBoilerResponse;
-    //             pendingPassthrough_ = true;
-    //         }
-
-    //         // 2. Check for boiler response
-    //         Frame response;
-    //         if (BoilerTask::getResponse(*queues_, response)) {
-    //             ESP_LOGD(TAG, "Got boiler response: 0x%08lX",
-    //                      static_cast<unsigned long>(response.raw()));
-    //             logMessage("RESPONSE", MessageSource::ThermostatBoiler, response);
-
-    //             if (loopState_ == LoopState::WaitDiagResponse) {
-    //                 // Diagnostic response
-    //                 if (response.isValidParity()) {
-    //                     parseDiagnosticResponse(response.dataId(), response);
-    //                     ESP_LOGD(TAG, "Diagnostic response parsed: ID=%d", response.dataId());
-    //                 }
-    //                 loopState_ = LoopState::Idle;
-    //             }
-    //             else if (loopState_ == LoopState::WaitBoilerResponse && pendingPassthrough_) {
-    //                 // Normal passthrough - forward to thermostat
-    //                 ThermostatTask::sendResponse(*queues_, response);
-    //                 pendingPassthrough_ = false;
-    //                 loopState_ = LoopState::Idle;
-    //             }
-    //             else {
-    //                 // Unexpected - still forward
-    //                 ThermostatTask::sendResponse(*queues_, response);
-    //                 loopState_ = LoopState::Idle;
-    //             }
-    //         }
-
-    //         // 3. Handle manual writes
-    //         if (manualWritePending_ && loopState_ == LoopState::Idle) {
-    //             ESP_LOGI(TAG, "Processing manual write: 0x%08lX",
-    //                      static_cast<unsigned long>(manualWriteFrame_.raw()));
-    //             logMessage("REQUEST", MessageSource::GatewayBoiler, manualWriteFrame_);
-
-    //             BoilerTask::sendRequest(*queues_, manualWriteFrame_);
-
-    //             // Wait for response (blocking)
-    //             int waitCount = 0;
-    //             while (waitCount < 100) {
-    //                 Frame resp;
-    //                 if (BoilerTask::getResponse(*queues_, resp)) {
-    //                     logMessage("RESPONSE", MessageSource::GatewayBoiler, resp);
-
-    //                     if (resp.isValidParity()) {
-    //                         if (resp.messageType() == MessageType::WriteAck) {
-    //                             manualWriteResult_ = ESP_OK;
-    //                         } else {
-    //                             manualWriteResult_ = ESP_ERR_INVALID_RESPONSE;
-    //                         }
-    //                         manualWriteResponse_ = resp;
-    //                     } else {
-    //                         manualWriteResult_ = ESP_ERR_INVALID_CRC;
-    //                     }
-    //                     break;
-    //                 }
-    //                 vTaskDelay(pdMS_TO_TICKS(10));
-    //                 waitCount++;
-    //             }
-
-    //             if (waitCount >= 100) {
-    //                 manualWriteResult_ = ESP_ERR_TIMEOUT;
-    //             }
-
-    //             manualWritePending_ = false;
-    //             xSemaphoreGive(manualWriteSem_);
-    //         }
-
-    //         // 4. Periodic diagnostics polling (control mode)
-    //         if (controlEnabled_ && controlActive_ && loopState_ == LoopState::Idle) {
-    //             if (nowMs - lastDiagPollMs_ >= 1000) {
-    //                 const auto& cmd = DIAG_COMMANDS[diagIndex_];
-    //                 diagIndex_ = (diagIndex_ + 1) % DIAG_COMMANDS_COUNT;
-
-    //                 Frame diagRequest = Frame::buildRequest(MessageType::ReadData, cmd.dataId, 0);
-    //                 logMessage("REQUEST", MessageSource::GatewayBoiler, diagRequest);
-
-    //                 BoilerTask::sendRequest(*queues_, diagRequest);
-    //                 loopState_ = LoopState::WaitDiagResponse;
-    //                 lastDiagPollMs_ = nowMs;
-    //             }
-    //         }
-
-    //         vTaskDelay(pdMS_TO_TICKS(1));
-    //     }
-
-    //     ESP_LOGI(TAG, "Main loop task stopped");
-    // }
-
-
     void taskFunction() {
         ESP_LOGI(TAG, "Main loop task started");
         uint32_t loopCount = 0;
@@ -351,48 +182,56 @@ private:
         // Rewrite the loop into a task waiting for notifications from the OpenTherm instances
         // Rewrite OpenTherm to use notifications, and try to use RMT instead of interrupts
         while (running_.load()) {
-            thermostat_->process([this, &loopCount, &validFrames, &invalidFrames](unsigned long request, OpenThermResponseStatus status) {
-                if (status == OpenThermResponseStatus::TIMEOUT) {
-                    // Don't log timeouts - they're normal when no data
-                    return;
-                }
+            auto thermostatRequest = thermostat_->waitForFrame(100);
 
-                Frame reqFrame(request);
-                uint8_t dataId = reqFrame.dataId();
-                auto msgType = reqFrame.messageType();
+            if (thermostatRequest.status == OpenThermResponseStatus::TIMEOUT) {
+                vTaskDelay(pdMS_TO_TICKS(1));
+                continue;
+            }
 
-                int64_t t0 = esp_timer_get_time();
+            if (thermostatRequest.status == OpenThermResponseStatus::INVALID) {
+                invalidFrames++;
+                logMessage("DISCARDED_REQUEST", MessageSource::ThermostatBoiler, thermostatRequest.frame);
+                vTaskDelay(pdMS_TO_TICKS(1));
+                continue;
+            }
 
-                if (status == OpenThermResponseStatus::INVALID) {
-                    invalidFrames++;
-                    logMessage("DISCARDED_REQUEST", MessageSource::ThermostatBoiler, reqFrame);
-                    return;
-                } else {
-                    validFrames++;
-                    Frame reqFrame(request);
-                    ESP_LOGI(TAG, "Forwarding ID=%d request 0x%08lX to boiler", reqFrame.dataId(), request);
-                    logMessage("REQUEST", MessageSource::ThermostatBoiler, reqFrame);
-                }
+            if (thermostatRequest.status != OpenThermResponseStatus::SUCCESS) {
+                invalidFrames++;
+                ESP_LOGW(TAG, "Thermostat frame invalid: 0x%08lX", thermostatRequest.frame);
+                vTaskDelay(pdMS_TO_TICKS(1));
+                continue;
+            }
 
-                auto boilerResponse = boiler_->sendRequest(request);
-                int64_t t1 = esp_timer_get_time();
+            int64_t t0 = esp_timer_get_time();
 
-                if (!boilerResponse) {
-                    ESP_LOGW(TAG, "Failed to send request to boiler (took %lld ms)", (t1 - t0) / 1000);
-                    return;
-                }
+            auto boilerRequestStatus = boiler_->sendFrame(thermostatRequest.frame);
+            if (boilerRequestStatus != OpenThermResponseStatus::SUCCESS) {
+                invalidFrames++;
+                ESP_LOGW(TAG, "Couldn't send frame 0x%08lX to boiler, got status %s", thermostatRequest.frame.raw(), OpenTherm::statusToString(boilerRequestStatus));
+                vTaskDelay(pdMS_TO_TICKS(1));
+                continue;
+            }
 
-                Frame respFrame(boilerResponse);
+            auto boilerResponse = boiler_->waitForFrame(100);
+            if (boilerResponse.status != OpenThermResponseStatus::SUCCESS) {
+                invalidFrames++;
+                ESP_LOGW(TAG, "Couldn't get response from boiler, got status %s", OpenTherm::statusToString(boilerResponse.status));
+                vTaskDelay(pdMS_TO_TICKS(1));
+                continue;
+            }
 
-                ESP_LOGI(TAG, "Boiler response: 0x%08lX (took %lld ms)", boilerResponse, (t1 - t0) / 1000);
+            int64_t t1 = esp_timer_get_time();
 
-                logMessage("RESPONSE", MessageSource::ThermostatBoiler, respFrame);
-                bool sent = thermostat_->sendResponse(boilerResponse);
-                int64_t t2 = esp_timer_get_time();
-                ESP_LOGI(TAG, "Response sent to thermostat: %s (took %lld ms total)", sent ? "OK" : "FAILED", (t2 - t0) / 1000);
+            ESP_LOGD(TAG, "Boiler response: 0x%08lX (took %lld ms)", boilerResponse, (t1 - t0) / 1000);
 
-                parseDiagnosticResponse(respFrame.dataId(), respFrame);
-            });
+            logMessage("RESPONSE", MessageSource::ThermostatBoiler, boilerResponse.frame);
+
+            auto thermostatResponseStatus = thermostat_->sendFrame(boilerResponse.frame);
+            int64_t t2 = esp_timer_get_time();
+            ESP_LOGI(TAG, "Response sent to thermostat: %s (took %lld ms total)", thermostatResponseStatus == OpenThermResponseStatus::SUCCESS ? "OK" : "FAILED", (t2 - t0) / 1000);
+
+            parseDiagnosticResponse(boilerResponse.frame.dataId(), boilerResponse.frame);
 
             // Periodic status logging
             loopCount++;

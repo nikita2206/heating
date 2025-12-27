@@ -16,7 +16,6 @@
 
 namespace ot {
 
-
 enum class OpenThermResponseStatus : uint8_t
 {
     NONE,
@@ -161,7 +160,9 @@ enum class OpenThermStatus : uint8_t
     RESPONSE_INVALID
 };
 
-// Forward declaration for friend function
+// Forward declarations
+class Frame;
+struct ReceivedFrame;
 bool on_rmt_rx_done(rmt_channel_handle_t rx_chan, const rmt_rx_done_event_data_t *edata, void *user_ctx);
 
 class OpenTherm
@@ -169,14 +170,16 @@ class OpenTherm
 public:
     friend void monitorTaskEntry(void* pvParameters);
     friend bool on_rmt_rx_done(rmt_channel_handle_t rx_chan, const rmt_rx_done_event_data_t *edata, void *user_ctx);
-    OpenTherm(gpio_num_t inPin = GPIO_NUM_4, gpio_num_t outPin = GPIO_NUM_5, bool isSlave = false, bool invertOutput = false);
+    OpenTherm(gpio_num_t inPin = GPIO_NUM_4, gpio_num_t outPin = GPIO_NUM_5, bool isSlave = false);
     ~OpenTherm();
     volatile OpenThermStatus status;
     void begin();
     bool isReady();
     unsigned long sendRequest(unsigned long request);
+    ReceivedFrame sendRequest(Frame frame);
     bool sendResponse(unsigned long request);
     bool sendRequestAsync(unsigned long request);
+    bool sendRequestAsync(Frame frame);
     [[deprecated("Use OpenTherm::sendRequestAsync(unsigned long) instead")]]
     bool sendRequestAync(unsigned long request) {
         return sendRequestAsync(request);
@@ -187,6 +190,15 @@ public:
     OpenThermResponseStatus getLastResponseStatus();
     static const char *statusToString(OpenThermResponseStatus status);
     unsigned long process(std::function<void(unsigned long, OpenThermResponseStatus)> callback = nullptr);
+    
+    // Wait for a frame (request or response) for up to timeoutMs milliseconds
+    // Returns ReceivedFrame with status TIMEOUT if no frame received within timeout
+    ReceivedFrame waitForFrame(uint32_t timeoutMs);
+
+    // Send a frame and return the status
+    // Blocks until the frame is sent or the timeout is reached (100ms)
+    OpenThermResponseStatus sendFrame(Frame frame);
+    
     void end();
 
     static bool parity(unsigned long frame);
@@ -250,7 +262,6 @@ private:
     const gpio_num_t inPin;
     const gpio_num_t outPin;
     const bool isSlave;
-    const bool invertOutput;
 
     volatile unsigned long response;
     volatile OpenThermResponseStatus responseStatus;
@@ -340,6 +351,18 @@ public:
 
 private:
     uint32_t raw_;
+};
+
+struct ReceivedFrame {
+    Frame frame;
+    OpenThermResponseStatus status;
+    uint64_t timestamp;
+    
+    ReceivedFrame() : frame(), status(OpenThermResponseStatus::NONE), timestamp(0) {}
+    ReceivedFrame(Frame f, OpenThermResponseStatus s, uint64_t ts) 
+        : frame(f), status(s), timestamp(ts) {}
+    ReceivedFrame(unsigned long raw, OpenThermResponseStatus s, uint64_t ts)
+        : frame(raw), status(s), timestamp(ts) {}
 };
 
 inline const char* toString(MessageType type) {

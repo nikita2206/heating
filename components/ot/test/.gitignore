@@ -1,5 +1,6 @@
 # Binary test executable
 rmt_parser_test
+test_harness
 
 rmt_parser_test.dSYM/
 

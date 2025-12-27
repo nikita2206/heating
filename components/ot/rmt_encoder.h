@@ -5,8 +5,8 @@
  * It can be compiled both for ESP-IDF (production) and standalone (testing).
  */
 
-#ifndef RMT_PARSER_H
-#define RMT_PARSER_H
+#ifndef RMT_ENCODER_H
+#define RMT_ENCODER_H
 
 #include <cstdint>
 #include <cstddef>
@@ -42,20 +42,33 @@ namespace ot {
  * @param isSlave Whether this is slave (thermostat) mode (affects logging only)
  * @return Decoded 32-bit frame, or 0 if parsing failed
  */
-uint32_t parseRMTSymbols(rmt_symbol_word_t* symbols, size_t num_symbols, bool isSlave = false);
+uint32_t decodeRmtAsOpenTherm(rmt_symbol_word_t* symbols, size_t num_symbols, bool isSlave = false);
+
+/**
+ * Encode an OpenTherm frame into RMT symbols
+ *
+ * Encodes a 32-bit OpenTherm frame into Manchester-encoded RMT symbols.
+ *
+ * @param frame The 32-bit OpenTherm frame to encode
+ * @param symbols Output array for RMT symbols (must have capacity for at least 34 symbols)
+ * @return Number of symbols generated (should be 34)
+ */
+size_t encodeOpenThermAsRmt(unsigned long frame, rmt_symbol_word_t* symbols);
 
 /**
  * Build a compact log string from RMT symbols for debugging
+ *
+ * Example output: "L500,H500,L1000,H500"
  * 
  * @param symbols Array of RMT symbols
  * @param num_symbols Number of symbols
  * @param buffer Output buffer
  * @param bufferSize Size of output buffer
  */
-void buildRMTSymbolLogString(rmt_symbol_word_t* symbols, size_t num_symbols, 
+void rmtSymbolsToString(rmt_symbol_word_t* symbols, size_t num_symbols, 
                               char* buffer, size_t bufferSize);
 
 } // namespace ot
 
-#endif // RMT_PARSER_H
+#endif // RMT_ENCODER_H
 
