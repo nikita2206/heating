@@ -31,6 +31,7 @@
 #include "mqtt_bridge.hpp"
 
 // WebSocket server (now C++)
+#include "opentherm_drv.h"
 #include "websocket_server.h"
 
 // C header for OTA (still in C)
@@ -137,7 +138,7 @@ static esp_err_t wifi_init_sta() {
 
 // Message callback - logs all OpenTherm messages to WebSocket
 static void opentherm_message_callback(std::string_view direction, ot::MessageSource source,
-                                       ot::Frame message) {
+                                       ot::OpenThermFrame message) {
     uint8_t data_id = message.dataId();
     uint16_t data_value = message.dataValue();
 

@@ -10,6 +10,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/semphr.h"
+#include "opentherm_drv.h"
 #include <atomic>
 #include <cstring>
 
@@ -79,14 +80,22 @@ public:
 
     esp_err_t start() {
         // Create OpenTherm instances with configured pins
-        thermostat_ = std::make_unique<OpenTherm>(
-            config_.thermostatInPin, config_.thermostatOutPin, true);
-        boiler_ = std::make_unique<OpenTherm>(
-            config_.boilerInPin, config_.boilerOutPin, false);
+        thermostat_ = std::make_unique<OpenThermDriver>(
+            OpenThermDriver::Config{
+                .inPin = config_.thermostatInPin,
+                .outPin = config_.thermostatOutPin,
+                .isSlave = true
+            });
+        boiler_ = std::make_unique<OpenThermDriver>(
+            OpenThermDriver::Config{
+                .inPin = config_.boilerInPin,
+                .outPin = config_.boilerOutPin,
+                .isSlave = false
+            });
 
         // Initialize OpenTherm instances
-        thermostat_->begin();
-        boiler_->begin();
+        thermostat_->start();
+        boiler_->start();
 
         running_ = true;
 
@@ -110,8 +119,8 @@ public:
 
     void stop() {
         running_ = false;
-        if (thermostat_) thermostat_->end();
-        if (boiler_) boiler_->end();
+        if (thermostat_) thermostat_->stop();
+        if (boiler_) boiler_->stop();
         if (taskHandle_) {
             vTaskDelay(pdMS_TO_TICKS(150));
             taskHandle_ = nullptr;
@@ -145,16 +154,22 @@ public:
     }
 
     esp_err_t writeData(uint8_t dataId, uint16_t dataValue,
-                        std::optional<Frame>& response,
+                        std::optional<OpenThermFrame>& response,
                         std::chrono::milliseconds timeout) {
-        Frame request = Frame::buildRequest(MessageType::WriteData, dataId, dataValue);
+        OpenThermFrame request = OpenThermFrame::buildRequest(OpenThermMessageType::WriteData, dataId, dataValue);
 
         // Send request to boiler
-        auto boilerResponse = boiler_->sendRequest(request.raw());
-        if (boilerResponse == 0) {
+        auto requestSent = boiler_->send(request);
+        if (!requestSent) {
             return ESP_ERR_INVALID_STATE; // Boiler busy
         }
-        response = Frame(boilerResponse);
+
+        auto boilerResponse = boiler_->receive(timeout.count());
+        if (!boilerResponse.has_value()) {
+            return ESP_ERR_TIMEOUT;
+        }
+
+        response = boilerResponse;
         return ESP_OK;
     }
 
@@ -182,44 +197,28 @@ private:
         // Rewrite the loop into a task waiting for notifications from the OpenTherm instances
         // Rewrite OpenTherm to use notifications, and try to use RMT instead of interrupts
         while (running_.load()) {
-            auto thermostatRequest = thermostat_->waitForFrame(100);
+            auto thermostatRequest = thermostat_->receive(500);
 
-            if (thermostatRequest.status == OpenThermResponseStatus::TIMEOUT) {
-                vTaskDelay(pdMS_TO_TICKS(1));
+            if (!thermostatRequest.has_value()) {
+                ESP_LOGI(TAG, "No request from thermostat in 500ms time");
                 continue;
             }
 
-            if (thermostatRequest.status == OpenThermResponseStatus::INVALID) {
-                invalidFrames++;
-                logMessage("DISCARDED_REQUEST", MessageSource::ThermostatBoiler, thermostatRequest.frame);
-                vTaskDelay(pdMS_TO_TICKS(1));
-                continue;
-            }
-
-            logMessage("REQUEST", MessageSource::ThermostatBoiler, thermostatRequest.frame);
-
-            if (thermostatRequest.status != OpenThermResponseStatus::SUCCESS) {
-                invalidFrames++;
-                ESP_LOGW(TAG, "Thermostat frame invalid: 0x%08lX", thermostatRequest.frame);
-                vTaskDelay(pdMS_TO_TICKS(1));
-                continue;
-            }
+            logMessage("REQUEST", MessageSource::ThermostatBoiler, thermostatRequest.value());
 
             int64_t t0 = esp_timer_get_time();
 
-            auto boilerRequestStatus = boiler_->sendFrame(thermostatRequest.frame);
-            if (boilerRequestStatus != OpenThermResponseStatus::SUCCESS) {
+            if (!boiler_->send(thermostatRequest.value())) {
                 invalidFrames++;
-                ESP_LOGW(TAG, "Couldn't send frame 0x%08lX to boiler, got status %s", thermostatRequest.frame.raw(), OpenTherm::statusToString(boilerRequestStatus));
-                vTaskDelay(pdMS_TO_TICKS(1));
+                ESP_LOGW(TAG, "Couldn't send frame 0x%08lX to boiler, likely the TX queue is full", thermostatRequest.value().raw());
                 continue;
             }
 
-            auto boilerResponse = boiler_->waitForFrame(250);
-            if (boilerResponse.status != OpenThermResponseStatus::SUCCESS) {
+            auto boilerResponse = boiler_->receive(250);
+            if (!boilerResponse.has_value()) {
                 invalidFrames++;
-                ESP_LOGW(TAG, "Couldn't get response from boiler, got status %s", OpenTherm::statusToString(boilerResponse.status));
-                vTaskDelay(pdMS_TO_TICKS(1));
+                ESP_LOGW(TAG, "Couldn't get response from boiler in time 250ms");
+                logMessage("RESPONSE",MessageSource::ThermostatBoiler, OpenThermFrame(0));
                 continue;
             }
 
@@ -227,13 +226,15 @@ private:
 
             ESP_LOGD(TAG, "Boiler response: 0x%08lX (took %lld ms)", boilerResponse, (t1 - t0) / 1000);
 
-            logMessage("RESPONSE", MessageSource::ThermostatBoiler, boilerResponse.frame);
+            logMessage("RESPONSE", MessageSource::ThermostatBoiler, boilerResponse.value());
+            parseDiagnosticResponse(boilerResponse.value().dataId(), boilerResponse.value());
 
-            auto thermostatResponseStatus = thermostat_->sendFrame(boilerResponse.frame);
-            int64_t t2 = esp_timer_get_time();
-            ESP_LOGI(TAG, "Response sent to thermostat: %s (took %lld ms total)", thermostatResponseStatus == OpenThermResponseStatus::SUCCESS ? "OK" : "FAILED", (t2 - t0) / 1000);
-
-            parseDiagnosticResponse(boilerResponse.frame.dataId(), boilerResponse.frame);
+            if (thermostat_->send(boilerResponse.value())) {
+                ESP_LOGI(TAG, "Response queued to be sent to thermostat");
+            } else {
+                ESP_LOGW(TAG, "Couldn't send response to thermostat, likely the TX queue is full");
+                continue;
+            }
 
             // Periodic status logging
             loopCount++;
@@ -243,22 +244,19 @@ private:
                          (unsigned long)invalidFrames,
                          gpio_get_level(config_.thermostatInPin));
             }
-
-            // Small delay to prevent busy looping
-            vTaskDelay(pdMS_TO_TICKS(1));
         }
 
         ESP_LOGI(TAG, "Main loop task stopped");
     }
 
 
-    void logMessage(std::string_view direction, MessageSource source, Frame message) {
+    void logMessage(std::string_view direction, MessageSource source, OpenThermFrame message) {
         if (messageCallback_) {
             messageCallback_(direction, source, message);
         }
     }
 
-    void parseDiagnosticResponse(uint8_t dataId, Frame response) {
+    void parseDiagnosticResponse(uint8_t dataId, OpenThermFrame response) {
         float floatVal;
         uint16_t uint16Val;
         uint8_t uint8Val;
@@ -443,8 +441,8 @@ private:
 
     // OpenTherm instances for thermostat (master) and boiler (slave)
     // Will be constructed in start() method with proper pins
-    std::unique_ptr<OpenTherm> thermostat_;
-    std::unique_ptr<OpenTherm> boiler_;
+    std::unique_ptr<OpenThermDriver> thermostat_;
+    std::unique_ptr<OpenThermDriver> boiler_;
 
     // Diagnostics
     Diagnostics diagnostics_;
@@ -494,7 +492,7 @@ void BoilerManager::setMode(ManagerMode mode) {
 }
 
 esp_err_t BoilerManager::writeData(uint8_t dataId, uint16_t dataValue,
-                                   std::optional<Frame>& response,
+                                   std::optional<OpenThermFrame>& response,
                                    std::chrono::milliseconds timeout) {
     return impl_->writeData(dataId, dataValue, response, timeout);
 }

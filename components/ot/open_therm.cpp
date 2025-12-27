@@ -527,9 +527,9 @@ bool OpenTherm::parity(unsigned long frame) // odd parity
     return (p & 1);
 }
 
-OpenThermMessageType OpenTherm::getMessageType(unsigned long message)
+OpenThermMessageType1 OpenTherm::getMessageType(unsigned long message)
 {
-    OpenThermMessageType msg_type = static_cast<OpenThermMessageType>((message >> 28) & 7);
+    OpenThermMessageType1 msg_type = static_cast<OpenThermMessageType1>((message >> 28) & 7);
     return msg_type;
 }
 
@@ -538,10 +538,10 @@ OpenThermMessageID OpenTherm::getDataID(unsigned long frame)
     return (OpenThermMessageID)((frame >> 16) & 0xFF);
 }
 
-unsigned long OpenTherm::buildRequest(OpenThermMessageType type, OpenThermMessageID id, unsigned int data)
+unsigned long OpenTherm::buildRequest(OpenThermMessageType1 type, OpenThermMessageID id, unsigned int data)
 {
     unsigned long request = data;
-    if (type == OpenThermMessageType::WRITE_DATA)
+    if (type == OpenThermMessageType1::WRITE_DATA)
     {
         request |= 1ul << 28;
     }
@@ -551,7 +551,7 @@ unsigned long OpenTherm::buildRequest(OpenThermMessageType type, OpenThermMessag
     return request;
 }
 
-unsigned long OpenTherm::buildResponse(OpenThermMessageType type, OpenThermMessageID id, unsigned int data)
+unsigned long OpenTherm::buildResponse(OpenThermMessageType1 type, OpenThermMessageID id, unsigned int data)
 {
     unsigned long response = data;
     response |= ((unsigned long)type) << 28;
@@ -569,7 +569,7 @@ bool OpenTherm::isValidResponse(unsigned long response, bool isSlave)
     }
     
     uint8_t msgType = (response << 1) >> 29;
-    bool valid = msgType == (uint8_t)OpenThermMessageType::READ_ACK || msgType == (uint8_t)OpenThermMessageType::WRITE_ACK;
+    bool valid = msgType == (uint8_t)OpenThermMessageType1::READ_ACK || msgType == (uint8_t)OpenThermMessageType1::WRITE_ACK;
     if (!valid) {
         ESP_LOGW("OT", "%s Invalid response (type): %lu", isSlave ? "T" : "B", response);
     }
@@ -583,7 +583,7 @@ bool OpenTherm::isValidRequest(unsigned long request, bool isSlave)
         return false;
     }
     uint8_t msgType = (request << 1) >> 29;
-    bool valid = msgType == (uint8_t)OpenThermMessageType::READ_DATA || msgType == (uint8_t)OpenThermMessageType::WRITE_DATA;
+    bool valid = msgType == (uint8_t)OpenThermMessageType1::READ_DATA || msgType == (uint8_t)OpenThermMessageType1::WRITE_DATA;
     if (!valid) {
         ESP_LOGW("OT", "%s Invalid request (type): %lu", isSlave ? "T" : "B", request);
     }
@@ -638,25 +638,25 @@ const char *OpenTherm::statusToString(OpenThermResponseStatus status)
     }
 }
 
-const char *OpenTherm::messageTypeToString(OpenThermMessageType message_type)
+const char *OpenTherm::messageTypeToString(OpenThermMessageType1 message_type)
 {
     switch (message_type)
     {
-    case OpenThermMessageType::READ_DATA:
+    case OpenThermMessageType1::READ_DATA:
         return "READ_DATA";
-    case OpenThermMessageType::WRITE_DATA:
+    case OpenThermMessageType1::WRITE_DATA:
         return "WRITE_DATA";
-    case OpenThermMessageType::INVALID_DATA:
+    case OpenThermMessageType1::INVALID_DATA:
         return "INVALID_DATA";
-    case OpenThermMessageType::RESERVED:
+    case OpenThermMessageType1::RESERVED:
         return "RESERVED";
-    case OpenThermMessageType::READ_ACK:
+    case OpenThermMessageType1::READ_ACK:
         return "READ_ACK";
-    case OpenThermMessageType::WRITE_ACK:
+    case OpenThermMessageType1::WRITE_ACK:
         return "WRITE_ACK";
-    case OpenThermMessageType::DATA_INVALID:
+    case OpenThermMessageType1::DATA_INVALID:
         return "DATA_INVALID";
-    case OpenThermMessageType::UNKNOWN_DATA_ID:
+    case OpenThermMessageType1::UNKNOWN_DATA_ID:
         return "UNKNOWN_DATA_ID";
     default:
         return "UNKNOWN";
@@ -669,18 +669,18 @@ unsigned long OpenTherm::buildSetBoilerStatusRequest(bool enableCentralHeating, 
 {
     unsigned int data = enableCentralHeating | (enableHotWater << 1) | (enableCooling << 2) | (enableOutsideTemperatureCompensation << 3) | (enableCentralHeating2 << 4);
     data <<= 8;
-    return buildRequest(OpenThermMessageType::READ_DATA, OpenThermMessageID::Status, data);
+    return buildRequest(OpenThermMessageType1::READ_DATA, OpenThermMessageID::Status, data);
 }
 
 unsigned long OpenTherm::buildSetBoilerTemperatureRequest(float temperature)
 {
     unsigned int data = temperatureToData(temperature);
-    return buildRequest(OpenThermMessageType::WRITE_DATA, OpenThermMessageID::TSet, data);
+    return buildRequest(OpenThermMessageType1::WRITE_DATA, OpenThermMessageID::TSet, data);
 }
 
 unsigned long OpenTherm::buildGetBoilerTemperatureRequest()
 {
-    return buildRequest(OpenThermMessageType::READ_DATA, OpenThermMessageID::Tboiler, 0);
+    return buildRequest(OpenThermMessageType1::READ_DATA, OpenThermMessageID::Tboiler, 0);
 }
 
 // parsing responses
@@ -765,13 +765,13 @@ float OpenTherm::getReturnTemperature()
 bool OpenTherm::setDHWSetpoint(float temperature)
 {
     unsigned int data = temperatureToData(temperature);
-    unsigned long response = sendRequest(buildRequest(OpenThermMessageType::WRITE_DATA, OpenThermMessageID::TdhwSet, data));
+    unsigned long response = sendRequest(buildRequest(OpenThermMessageType1::WRITE_DATA, OpenThermMessageID::TdhwSet, data));
     return isValidResponse(response, isSlave);
 }
 
 float OpenTherm::getDHWTemperature()
 {
-    unsigned long response = sendRequest(buildRequest(OpenThermMessageType::READ_DATA, OpenThermMessageID::Tdhw, 0));
+    unsigned long response = sendRequest(buildRequest(OpenThermMessageType1::READ_DATA, OpenThermMessageID::Tdhw, 0));
     return isValidResponse(response, isSlave) ? getFloat(response) : 0;
 }
 

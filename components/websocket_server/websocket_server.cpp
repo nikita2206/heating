@@ -6,6 +6,7 @@
 #include "boiler_manager.hpp"
 #include "mqtt_bridge.hpp"
 #include "open_therm.h"
+#include "opentherm_drv.h"
 
 extern "C" {
 #include "web_ui.h"
@@ -360,7 +361,7 @@ static esp_err_t write_api_handler(httpd_req_t* req) {
     }
 
     // Send WRITE_DATA frame
-    std::optional<ot::Frame> response;
+    std::optional<ot::OpenThermFrame> response;
     esp_err_t err = s_boiler_mgr->writeData(data_id, data_value, response);
 
     // Build JSON response
@@ -509,7 +510,7 @@ static esp_err_t ws_handler(httpd_req_t* req) {
 // Message callback for boiler_manager
 static void boiler_manager_message_handler(std::string_view direction,
                                             ot::MessageSource source,
-                                            ot::Frame message) {
+                                            ot::OpenThermFrame message) {
     if (!s_ws_server) return;
 
     const char* source_str = ot::toString(source);

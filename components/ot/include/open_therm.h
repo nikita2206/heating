@@ -24,7 +24,7 @@ enum class OpenThermResponseStatus : uint8_t
     TIMEOUT
 };
 
-enum class OpenThermMessageType : uint8_t
+enum class OpenThermMessageType1 : uint8_t
 {
     /*  Master to Slave */
     READ_DATA = 0b000,
@@ -40,7 +40,7 @@ enum class OpenThermMessageType : uint8_t
     UNKNOWN_DATA_ID = 0b111
 };
 
-typedef OpenThermMessageType OpenThermRequestType; // for backward compatibility
+typedef OpenThermMessageType1 OpenThermRequestType; // for backward compatibility
 
 enum class OpenThermMessageID : uint8_t
 {
@@ -184,8 +184,8 @@ public:
     bool sendRequestAync(unsigned long request) {
         return sendRequestAsync(request);
     }
-    static unsigned long buildRequest(OpenThermMessageType type, OpenThermMessageID id, unsigned int data);
-    static unsigned long buildResponse(OpenThermMessageType type, OpenThermMessageID id, unsigned int data);
+    static unsigned long buildRequest(OpenThermMessageType1 type, OpenThermMessageID id, unsigned int data);
+    static unsigned long buildResponse(OpenThermMessageType1 type, OpenThermMessageID id, unsigned int data);
     unsigned long getLastResponse();
     OpenThermResponseStatus getLastResponseStatus();
     static const char *statusToString(OpenThermResponseStatus status);
@@ -202,9 +202,9 @@ public:
     void end();
 
     static bool parity(unsigned long frame);
-    static OpenThermMessageType getMessageType(unsigned long message);
+    static OpenThermMessageType1 getMessageType(unsigned long message);
     static OpenThermMessageID getDataID(unsigned long frame);
-    static const char *messageTypeToString(OpenThermMessageType message_type);
+    static const char *messageTypeToString(OpenThermMessageType1 message_type);
     static bool isValidRequest(unsigned long request, bool isSlave);
     static bool isValidResponse(unsigned long response, bool isSlave);
 

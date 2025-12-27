@@ -17,6 +17,7 @@
 #include "esp_err.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
+#include "opentherm_drv.h"
 
 namespace ot {
 
@@ -108,7 +109,7 @@ struct ManagerStatus {
 // Message callback type
 using MessageCallback = std::function<void(std::string_view direction,
                                            MessageSource source,
-                                           Frame message)>;
+                                           OpenThermFrame message)>;
 
 /**
  * Configuration for boiler manager
@@ -159,7 +160,7 @@ public:
 
     // Manual write to boiler (thread-safe, blocks up to timeout)
     [[nodiscard]] esp_err_t writeData(uint8_t dataId, uint16_t dataValue,
-                                      std::optional<Frame>& response,
+                                      std::optional<OpenThermFrame>& response,
                                       std::chrono::milliseconds timeout = std::chrono::seconds(2));
 
     // Message callback for logging

@@ -25,6 +25,20 @@ enum class OpenThermMessageType : uint8_t {
     UnknownId    = 0b111
 };
 
+inline const char* toString(OpenThermMessageType type) {
+    switch (type) {
+        case OpenThermMessageType::ReadData:    return "READ_DATA";
+        case OpenThermMessageType::WriteData:   return "WRITE_DATA";
+        case OpenThermMessageType::InvalidData: return "INVALID_DATA";
+        case OpenThermMessageType::Reserved:    return "RESERVED";
+        case OpenThermMessageType::ReadAck:     return "READ_ACK";
+        case OpenThermMessageType::WriteAck:    return "WRITE_ACK";
+        case OpenThermMessageType::DataInvalid: return "DATA_INVALID";
+        case OpenThermMessageType::UnknownId:   return "UNKNOWN_ID";
+        default:                       return "UNKNOWN";
+    }
+}
+
 class OpenThermFrame {
 public:
     constexpr OpenThermFrame() : raw_(0) {}
