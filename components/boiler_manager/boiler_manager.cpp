@@ -25,43 +25,41 @@ struct DiagnosticCmd {
 
 // Diagnostic commands to poll
 static constexpr DiagnosticCmd DIAG_COMMANDS[] = {
-    {25, "Tboiler"},
-    {57, "BoilerStatus"},
-    {28, "Tret"},
-    {26, "Tdhw"},
-    {1, "TSet"},
-    {17, "RelModLevel"},
-    {18, "CHPressure"},
-    {27, "Toutside"},
-    {33, "Texhaust"},
-    {34, "TboilerHeatExchanger"},
-    {19, "DHWFlowRate"},
-    {5, "ASFflags"},
-    {115, "OEMDiagnosticCode"},
-    {15, "MaxCapacityMinModLevel"},
-    {35, "BoilerFanSpeed"},
-    {32, "Tdhw2"},
-    {31, "TflowCH2"},
-    {29, "Tstorage"},
-    {30, "Tcollector"},
-    {79, "CO2exhaust"},
-    {84, "RPMexhaust"},
-    {85, "RPMsupply"},
-    {116, "BurnerStarts"},
-    {119, "DHWBurnerStarts"},
-    {117, "CHPumpStarts"},
-    {118, "DHWPumpStarts"},
-    {120, "BurnerHours"},
-    {123, "DHWBurnerHours"},
-    {121, "CHPumpHours"},
-    {122, "DHWPumpHours"},
-    {3, "SlaveConfig"},
-    {127, "SlaveVersion"},
-    {125, "SlaveOTVersion"},
-    {48, "DhwBounds"},
-    {49, "MaxTSetBounds"},
-    {200, "Custom200"},
-    {202, "Custom202"},
+    { OT_FRAME_T_BOILER,            "Tboiler" },
+    { OT_FRAME_MAX_CH_SETPOINT,     "BoilerStatus" },
+    { OT_FRAME_T_RET,               "Tret" },
+    { OT_FRAME_T_DHW,               "Tdhw" },
+    { OT_FRAME_TSET,                "TSet" },
+    { OT_FRAME_MODULATION,          "RelModLevel" },
+    { OT_FRAME_CH_PRESSURE,         "CHPressure" },
+    { OT_FRAME_T_OUTSIDE,           "Toutside" },
+    { OT_FRAME_T_EXHAUST,           "Texhaust" },
+    { OT_FRAME_T_HEAT_EXCHANGER,    "TboilerHeatExchanger" },
+    { OT_FRAME_DHW_FLOW_RATE,       "DHWFlowRate" },
+    { OT_FRAME_ASF_FLAGS,           "ASFflags" },
+    { OT_FRAME_OEM_DIAGNOSTIC,      "OEMDiagnosticCode" },
+    { OT_FRAME_MAX_CAPACITY,        "MaxCapacityMinModLevel" },
+    { OT_FRAME_FAN_SPEED,           "BoilerFanSpeed" },
+    { OT_FRAME_T_DHW2,              "Tdhw2" },
+    { OT_FRAME_T_FLOW_CH2,          "TflowCH2" },
+    { OT_FRAME_T_STORAGE,           "Tstorage" },
+    { OT_FRAME_T_COLLECTOR,         "Tcollector" },
+    { OT_FRAME_CO2_EXHAUST,         "CO2exhaust" },
+    { OT_FRAME_RPM_EXHAUST,         "RPMexhaust" },
+    { OT_FRAME_RPM_SUPPLY,          "RPMsupply" },
+    { OT_FRAME_BURNER_STARTS,       "BurnerStarts" },
+    { OT_FRAME_DHW_BURNER_STARTS,   "DHWBurnerStarts" },
+    { OT_FRAME_CH_PUMP_STARTS,      "CHPumpStarts" },
+    { OT_FRAME_DHW_PUMP_STARTS,     "DHWPumpStarts" },
+    { OT_FRAME_BURNER_HOURS,        "BurnerHours" },
+    { OT_FRAME_DHW_BURNER_HOURS,    "DHWBurnerHours" },
+    { OT_FRAME_CH_PUMP_HOURS,       "CHPumpHours" },
+    { OT_FRAME_DHW_PUMP_HOURS,      "DHWPumpHours" },
+    { OT_FRAME_SLAVE_CONFIG,        "SlaveConfig" },
+    { OT_FRAME_SLAVE_VERSION,       "SlaveVersion" },
+    { OT_FRAME_SLAVE_OT_VERSION,    "SlaveOTVersion" },
+    { OT_FRAME_DHW_BOUNDS,          "DhwBounds" },
+    { OT_FRAME_CH_BOUNDS,           "MaxTSetBounds" },
 };
 
 static constexpr size_t DIAG_COMMANDS_COUNT = sizeof(DIAG_COMMANDS) / sizeof(DIAG_COMMANDS[0]);
@@ -139,21 +137,23 @@ public:
 
     const BoilerState& state() const { return boilerState_; }
 
-    void setControlEnabled(bool enabled) {
-        // No-op in passthrough mode
-        (void)enabled;
-    }
-
     ManagerStatus status() const {
-        // Return default status for passthrough mode
         ManagerStatus s;
-        s.controlEnabled = false;
-        s.controlActive = false;
-        s.fallbackActive = false;
-        s.demandTsetC = 0.0f;
-        s.demandChEnabled = false;
-        s.lastDemandTime = std::chrono::milliseconds{0};
-        s.mqttAvailable = false;
+        // Control is enabled if mode is set to Control
+        s.controlEnabled = (config_.mode == ManagerMode::Control);
+        
+        // Check if MQTT is available (connected)
+        s.mqttAvailable = (mqttBridge_ && mqttBridge_->state().available);
+        
+        // Fallback is active if we want control but MQTT is not available
+        s.fallbackActive = s.controlEnabled && !s.mqttAvailable;
+        
+        // Control is active only if enabled and not in fallback
+        s.controlActive = s.controlEnabled && !s.fallbackActive;
+        
+        s.demandTsetC = demandTsetC_;
+        s.demandChEnabled = demandChEnabled_;
+        s.lastDemandTime = lastDemandTime_;
         return s;
     }
 
@@ -202,8 +202,6 @@ private:
         uint32_t validFrames = 0;
         uint32_t invalidFrames = 0;
 
-        // Rewrite the loop into a task waiting for notifications from the OpenTherm instances
-        // Rewrite OpenTherm to use notifications, and try to use RMT instead of interrupts
         while (running_.load()) {
             auto thermostatRequest = thermostat_->receive(500);
 
@@ -213,6 +211,9 @@ private:
             }
 
             logMessage("REQUEST", MessageSource::ThermostatBoiler, thermostatRequest.value());
+
+            // Capture demand from thermostat request
+            captureDemand(thermostatRequest.value());
 
             // Intercept logic (Proxy Mode)
             if (config_.mode == ManagerMode::Proxy &&
@@ -236,7 +237,7 @@ private:
             if (!boilerResponse.has_value()) {
                 invalidFrames++;
                 ESP_LOGW(TAG, "Couldn't get response from boiler in time 250ms");
-                logMessage("RESPONSE",MessageSource::ThermostatBoiler, OpenThermFrame(0));
+                logMessage("RESPONSE", MessageSource::ThermostatBoiler, OpenThermFrame(0));
                 continue;
             }
 
@@ -279,11 +280,13 @@ private:
         
         // 2. Send Diagnostic Request to Boiler
         OpenThermFrame diagReq = OpenThermFrame::buildRequest(OpenThermMessageType::ReadData, diagCmd.dataId, 0);
-        
+
+        logMessage("REQUEST", MessageSource::GatewayBoiler, diagReq);
         if (boiler_->send(diagReq)) {
             auto diagResp = boiler_->receive(250);
             if (diagResp.has_value()) {
-                 parseDiagnosticResponse(diagResp.value().dataId(), diagResp.value());
+                logMessage("RESPONSE", MessageSource::GatewayBoiler, diagResp.value());
+                parseDiagnosticResponse(diagResp.value().dataId(), diagResp.value());
             } else {
                  ESP_LOGW(TAG, "Diagnostic query timeout for ID %d", diagCmd.dataId);
             }
@@ -291,7 +294,7 @@ private:
         
         // 3. Fake response to Thermostat
         OpenThermFrame fakeResponse = prepareThermostatResponse(request);
-        
+        logMessage("RESPONSE", MessageSource::ThermostatBoiler, fakeResponse);
         if (thermostat_->send(fakeResponse)) {
             validFrames++;
         } else {
@@ -308,12 +311,12 @@ private:
 
         // List of interceptable IDs: 18, 202, 200, 19, 26, 17
         switch (request.dataId()) {
-            case 17: // RelModLevel
-            case 18: // CHPressure
-            case 19: // DHWFlowRate
-            case 26: // Tdhw
-            case 200: // Custom/Unknown
-            case 202: // Custom/Unknown
+            case OT_FRAME_MODULATION:
+            case OT_FRAME_CH_PRESSURE:
+            case OT_FRAME_DHW_FLOW_RATE:
+            case OT_FRAME_T_DHW:
+            case OT_FRAME_CUSTOM_200:
+            case OT_FRAME_CUSTOM_202:
                 return true;
             default:
                 return false;
@@ -326,12 +329,12 @@ private:
 
         // Map ID to the corresponding BoilerStateValue
         switch (id) {
-            case 17:  value = &boilerState_.modulationLevel; break;
-            case 18:  value = &boilerState_.pressure;        break;
-            case 19:  value = &boilerState_.flowRate;        break;
-            case 26:  value = &boilerState_.tDhw;            break;
-            case 200: value = &boilerState_.custom200;       break;
-            case 202: value = &boilerState_.custom202;       break;
+            case OT_FRAME_MODULATION:  value = &boilerState_.modulationLevel; break;
+            case OT_FRAME_CH_PRESSURE:  value = &boilerState_.pressure;        break;
+            case OT_FRAME_DHW_FLOW_RATE:  value = &boilerState_.flowRate;        break;
+            case OT_FRAME_T_DHW:  value = &boilerState_.tDhw;            break;
+            case OT_FRAME_CUSTOM_200: value = &boilerState_.custom200;       break;
+            case OT_FRAME_CUSTOM_202: value = &boilerState_.custom202;       break;
             default: break;
         }
 
@@ -339,6 +342,23 @@ private:
             return OpenThermFrame::buildResponse(OpenThermMessageType::ReadAck, id, value->raw());
         } else {
             return OpenThermFrame::buildResponse(OpenThermMessageType::ReadAck, 0, 0);
+        }
+    }
+
+    void captureDemand(const OpenThermFrame& thermostatFrame) {
+        if (thermostatFrame.messageType() == OpenThermMessageType::ReadData || 
+            thermostatFrame.messageType() == OpenThermMessageType::WriteData) {
+            
+            uint8_t id = thermostatFrame.dataId();
+            if (id == OT_FRAME_STATUS) { // Status
+                // Bit 0 of high byte is CH Enable
+                bool chEnabled = (thermostatFrame.highByte() & 0x01) != 0;
+                demandChEnabled_ = chEnabled;
+                lastDemandTime_ = std::chrono::milliseconds(esp_timer_get_time() / 1000);
+            } else if (id == OT_FRAME_TSET) { // TSet
+                demandTsetC_ = thermostatFrame.asFloat();
+                lastDemandTime_ = std::chrono::milliseconds(esp_timer_get_time() / 1000);
+            }
         }
     }
 
@@ -354,7 +374,7 @@ private:
         uint8_t uint8Val;
 
         switch (dataId) {
-            case 0:
+            case OT_FRAME_STATUS:
                 // Status message - extract slave status flags (low byte)
                 {
                     uint8_t slaveStatus = response.lowByte();
@@ -383,44 +403,44 @@ private:
                     boilerState_.diagnosticEvent = (slaveStatus & 0x40) != 0;
                 }
                 break;
-            case 25:
+            case OT_FRAME_T_BOILER:
                 floatVal = response.asFloat();
                 diagnostics_.tBoiler.update(floatVal);
                 boilerState_.tBoiler.update(floatVal);
                 publishDiag("tboiler", "Boiler Temperature", "C", diagnostics_.tBoiler);
                 break;
-            case 57:
+            case OT_FRAME_MAX_CH_SETPOINT:
                 floatVal = response.asFloat();
                 diagnostics_.maxChWaterTemp.update(floatVal);
                 boilerState_.maxChWaterTemp.update(floatVal);
                 publishDiag("maxchwatertemp", "Max CH Water Temperature", "C", diagnostics_.maxChWaterTemp);
                 break;
-            case 28:
+            case OT_FRAME_T_RET:
                 floatVal = response.asFloat();
                 diagnostics_.tReturn.update(floatVal);
                 boilerState_.tReturn.update(floatVal);
                 publishDiag("treturn", "Return Temperature", "C", diagnostics_.tReturn);
                 break;
-            case 26:
+            case OT_FRAME_T_DHW:
                 floatVal = response.asFloat();
                 if (floatVal > 0) {
                     diagnostics_.tDhw.update(floatVal);
                     boilerState_.tDhw.update(floatVal);
                 }
                 break;
-            case 32:
+            case OT_FRAME_T_DHW2:
                 floatVal = response.asFloat();
                 if (floatVal > 0) {
                     diagnostics_.tDhw2.update(floatVal);
                     boilerState_.tDhw2.update(floatVal);
                 }
                 break;
-            case 27:
+            case OT_FRAME_T_OUTSIDE:
                 floatVal = response.asFloat();
                 diagnostics_.tOutside.update(floatVal);
                 boilerState_.tOutside.update(floatVal);
                 break;
-            case 33:
+            case OT_FRAME_T_EXHAUST:
                 floatVal = static_cast<float>(static_cast<int16_t>(response.dataValue()));
                 if (floatVal > -40 && floatVal < 500) {
                     diagnostics_.tExhaust.update(floatVal);
@@ -428,35 +448,35 @@ private:
                     publishDiag("texhaust", "Exhaust Temperature", "C", diagnostics_.tExhaust);
                 }
                 break;
-            case 34:
+            case OT_FRAME_T_HEAT_EXCHANGER:
                 floatVal = static_cast<float>(static_cast<int16_t>(response.dataValue()));
                 if (floatVal > 0) {
                     diagnostics_.tHeatExchanger.update(floatVal);
                     boilerState_.tHeatExchanger.update(floatVal);
                 }
                 break;
-            case 31:
+            case OT_FRAME_T_FLOW_CH2:
                 floatVal = response.asFloat();
                 if (floatVal > 0) {
                     diagnostics_.tFlowCh2.update(floatVal);
                     boilerState_.tFlowCh2.update(floatVal);
                 }
                 break;
-            case 29:
+            case OT_FRAME_T_STORAGE:
                 floatVal = response.asFloat();
                 if (floatVal > 0) {
                     diagnostics_.tStorage.update(floatVal);
                     boilerState_.tStorage.update(floatVal);
                 }
                 break;
-            case 30:
+            case OT_FRAME_T_COLLECTOR:
                 floatVal = response.asFloat();
                 if (floatVal > 0) {
                     diagnostics_.tCollector.update(floatVal);
                     boilerState_.tCollector.update(floatVal);
                 }
                 break;
-            case 1:
+            case OT_FRAME_TSET:
                 floatVal = response.asFloat();
                 if (floatVal > 0 && floatVal < 100) {
                     diagnostics_.tSetpoint.update(floatVal);
@@ -464,7 +484,7 @@ private:
                     publishDiag("tset", "Boiler Setpoint", "C", diagnostics_.tSetpoint);
                 }
                 break;
-            case 17:
+            case OT_FRAME_MODULATION:
                 floatVal = response.asFloat();
                 if (floatVal >= 0 && floatVal <= 100) {
                     diagnostics_.modulationLevel.update(floatVal);
@@ -472,7 +492,7 @@ private:
                     publishDiag("modulation", "Modulation Level", "%", diagnostics_.modulationLevel);
                 }
                 break;
-            case 18:
+            case OT_FRAME_CH_PRESSURE:
                 floatVal = response.asFloat();
                 if (floatVal >= 0) {
                     diagnostics_.pressure.update(floatVal);
@@ -480,132 +500,132 @@ private:
                     publishDiag("pressure", "CH Pressure", "bar", diagnostics_.pressure);
                 }
                 break;
-            case 19:
+            case OT_FRAME_DHW_FLOW_RATE:
                 floatVal = response.asFloat();
                 if (floatVal >= 0) {
                     diagnostics_.flowRate.update(floatVal);
                     boilerState_.flowRate.update(floatVal);
                 }
                 break;
-            case 5:
+            case OT_FRAME_ASF_FLAGS:
                 uint8Val = response.lowByte();
                 diagnostics_.faultCode.update(static_cast<float>(uint8Val));
                 boilerState_.faultCode.update(static_cast<uint16_t>(uint8Val));
                 publishDiag("fault", "Fault Code", "", diagnostics_.faultCode);
                 break;
-            case 115:
+            case OT_FRAME_OEM_DIAGNOSTIC:
                 uint16Val = response.dataValue();
                 diagnostics_.diagCode.update(static_cast<float>(uint16Val));
                 boilerState_.diagCode.update(uint16Val);
                 break;
-            case 116:
+            case OT_FRAME_BURNER_STARTS:
                 uint16Val = response.dataValue();
                 diagnostics_.burnerStarts.update(static_cast<float>(uint16Val));
                 boilerState_.burnerStarts.update(uint16Val);
                 break;
-            case 119:
+            case OT_FRAME_DHW_BURNER_STARTS:
                 uint16Val = response.dataValue();
                 diagnostics_.dhwBurnerStarts.update(static_cast<float>(uint16Val));
                 boilerState_.dhwBurnerStarts.update(uint16Val);
                 break;
-            case 117:
+            case OT_FRAME_CH_PUMP_STARTS:
                 uint16Val = response.dataValue();
                 diagnostics_.chPumpStarts.update(static_cast<float>(uint16Val));
                 boilerState_.chPumpStarts.update(uint16Val);
                 break;
-            case 118:
+            case OT_FRAME_DHW_PUMP_STARTS:
                 uint16Val = response.dataValue();
                 diagnostics_.dhwPumpStarts.update(static_cast<float>(uint16Val));
                 boilerState_.dhwPumpStarts.update(uint16Val);
                 break;
-            case 120:
+            case OT_FRAME_BURNER_HOURS:
                 uint16Val = response.dataValue();
                 diagnostics_.burnerHours.update(static_cast<float>(uint16Val));
                 boilerState_.burnerHours.update(uint16Val);
                 break;
-            case 123:
+            case OT_FRAME_DHW_BURNER_HOURS:
                 uint16Val = response.dataValue();
                 diagnostics_.dhwBurnerHours.update(static_cast<float>(uint16Val));
                 boilerState_.dhwBurnerHours.update(uint16Val);
                 break;
-            case 121:
+            case OT_FRAME_CH_PUMP_HOURS:
                 uint16Val = response.dataValue();
                 diagnostics_.chPumpHours.update(static_cast<float>(uint16Val));
                 boilerState_.chPumpHours.update(uint16Val);
                 break;
-            case 122:
+            case OT_FRAME_DHW_PUMP_HOURS:
                 uint16Val = response.dataValue();
                 diagnostics_.dhwPumpHours.update(static_cast<float>(uint16Val));
                 boilerState_.dhwPumpHours.update(uint16Val);
                 break;
-            case 15:
+            case OT_FRAME_MAX_CAPACITY:
                 diagnostics_.maxCapacity.update(static_cast<float>(response.highByte()));
                 diagnostics_.minModLevel.update(static_cast<float>(response.lowByte()));
                 
                 boilerState_.maxCapacity.update(static_cast<uint16_t>(response.highByte()));
                 boilerState_.minModLevel.update(static_cast<uint16_t>(response.lowByte()));
                 break;
-            case 35:
+            case OT_FRAME_FAN_SPEED:
                 diagnostics_.fanSetpoint.update(static_cast<float>(response.highByte()));
                 diagnostics_.fanCurrent.update(static_cast<float>(response.lowByte()));
                 
                 boilerState_.fanSetpoint.update(static_cast<uint16_t>(response.highByte()));
                 boilerState_.fanCurrent.update(static_cast<uint16_t>(response.lowByte()));
                 break;
-            case 84:
+            case OT_FRAME_RPM_EXHAUST:
                 uint16Val = response.dataValue();
                 diagnostics_.fanExhaustRpm.update(static_cast<float>(uint16Val));
                 boilerState_.fanExhaustRpm.update(uint16Val);
                 break;
-            case 85:
+            case OT_FRAME_RPM_SUPPLY:
                 uint16Val = response.dataValue();
                 diagnostics_.fanSupplyRpm.update(static_cast<float>(uint16Val));
                 boilerState_.fanSupplyRpm.update(uint16Val);
                 break;
-            case 79:
+            case OT_FRAME_CO2_EXHAUST:
                 uint16Val = response.dataValue();
                 diagnostics_.co2Exhaust.update(static_cast<float>(uint16Val));
                 boilerState_.co2Exhaust.update(uint16Val);
                 break;
-            case 3:
+            case OT_FRAME_SLAVE_CONFIG:
                 diagnostics_.slaveMemberId.update(static_cast<float>(response.lowByte()));
                 diagnostics_.slaveConfigFlags.update(static_cast<float>(response.highByte()));
                 
                 boilerState_.slaveMemberId.update(static_cast<uint16_t>(response.lowByte()));
                 boilerState_.slaveConfigFlags.update(static_cast<uint16_t>(response.highByte()));
                 break;
-            case 127:
+            case OT_FRAME_SLAVE_VERSION:
                 diagnostics_.slaveVersion.update(static_cast<float>(response.lowByte()));
                 diagnostics_.slaveType.update(static_cast<float>(response.highByte()));
                 
                 boilerState_.slaveVersion.update(static_cast<uint16_t>(response.lowByte()));
                 boilerState_.slaveType.update(static_cast<uint16_t>(response.highByte()));
                 break;
-            case 125:
+            case OT_FRAME_SLAVE_OT_VERSION:
                 floatVal = response.asFloat();
                 diagnostics_.slaveOTVersion.update(floatVal);
                 boilerState_.slaveOTVersion.update(floatVal);
                 break;
-            case 48:
+            case OT_FRAME_DHW_BOUNDS:
                 diagnostics_.dhwSetLB.update(static_cast<float>(static_cast<int8_t>(response.lowByte())));
                 diagnostics_.dhwSetUB.update(static_cast<float>(static_cast<int8_t>(response.highByte())));
                 
                 boilerState_.dhwSetLB.update(static_cast<uint16_t>(response.lowByte()));
                 boilerState_.dhwSetUB.update(static_cast<uint16_t>(response.highByte()));
                 break;
-            case 49:
+            case OT_FRAME_CH_BOUNDS:
                 diagnostics_.maxTSetLB.update(static_cast<float>(static_cast<int8_t>(response.lowByte())));
                 diagnostics_.maxTSetUB.update(static_cast<float>(static_cast<int8_t>(response.highByte())));
                 
                 boilerState_.maxTSetLB.update(static_cast<uint16_t>(response.lowByte()));
                 boilerState_.maxTSetUB.update(static_cast<uint16_t>(response.highByte()));
                 break;
-            case 200:
+            case OT_FRAME_CUSTOM_200:
                 uint16Val = response.dataValue();
                 diagnostics_.custom200.update(static_cast<float>(uint16Val));
                 boilerState_.custom200.update(uint16Val);
                 break;
-            case 202:
+            case OT_FRAME_CUSTOM_202:
                 uint16Val = response.dataValue();
                 diagnostics_.custom202.update(static_cast<float>(uint16Val));
                 boilerState_.custom202.update(uint16Val);
@@ -644,6 +664,11 @@ private:
     // MQTT bridge for publishing diagnostics
     MqttBridge* mqttBridge_ = nullptr;
     size_t currentDiagIndex_ = 0;
+
+    // Control state
+    float demandTsetC_ = 0.0f;
+    bool demandChEnabled_ = false;
+    std::chrono::milliseconds lastDemandTime_{0};
 };
 
 // BoilerManager implementation
@@ -675,10 +700,6 @@ const Diagnostics& BoilerManager::diagnostics() const {
 
 const BoilerState& BoilerManager::state() const {
     return impl_->state();
-}
-
-void BoilerManager::setControlEnabled(bool enabled) {
-    impl_->setControlEnabled(enabled);
 }
 
 ManagerStatus BoilerManager::status() const {

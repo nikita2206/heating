@@ -30,9 +30,7 @@ static void mqtt_control_mode_handler(bool enabled) {
     ESP_LOGI(TAG, "MQTT control mode change: %s", enabled ? "ON" : "OFF");
     if (enabled) {
         s_boiler_mgr->setMode(ot::ManagerMode::Control);
-        s_boiler_mgr->setControlEnabled(true);
     } else {
-        s_boiler_mgr->setControlEnabled(false);
         s_boiler_mgr->setMode(ot::ManagerMode::Passthrough);
     }
 }
@@ -262,9 +260,7 @@ static esp_err_t control_mode_post_handler(httpd_req_t* req) {
     if (s_boiler_mgr) {
         if (enable) {
             s_boiler_mgr->setMode(ot::ManagerMode::Control);
-            s_boiler_mgr->setControlEnabled(true);
         } else {
-            s_boiler_mgr->setControlEnabled(false);
             s_boiler_mgr->setMode(ot::ManagerMode::Passthrough);
         }
     }
@@ -393,15 +389,22 @@ static esp_err_t write_api_handler(httpd_req_t* req) {
     return ESP_OK;
 }
 
-// Helper to format diagnostic value
-static int format_diag_value(char* buf, size_t buf_size, const char* name,
-                              const ot::DiagnosticValue& val, int64_t current_time_ms) {
+// Helper to format boiler state value
+static int format_boiler_value(char* buf, size_t buf_size, const char* name,
+                              const ot::BoilerStateValue& val, int64_t current_time_ms) {
     int64_t age_ms = (val.isValid() && val.timestamp.count() > 0)
                      ? (current_time_ms - val.timestamp.count()) : -1;
     return snprintf(buf, buf_size,
         "\"%s\":{\"value\":%.2f,\"age_ms\":%lld,\"valid\":%s}",
-        name, val.valueOr(0.0f), static_cast<long long>(age_ms),
+        name, val.asFloatOr(0.0f), static_cast<long long>(age_ms),
         val.isValid() ? "true" : "false");
+}
+
+// Helper to format boolean flag (no timestamp in BoilerState for these)
+static int format_boiler_bool(char* buf, size_t buf_size, const char* name, bool val) {
+    return snprintf(buf, buf_size,
+        "\"%s\":{\"value\":%.2f,\"age_ms\":-1,\"valid\":true}",
+        name, val ? 1.0f : 0.0f);
 }
 
 // API handler for diagnostics JSON
@@ -412,7 +415,7 @@ static esp_err_t diagnostics_api_handler(httpd_req_t* req) {
         return ESP_FAIL;
     }
 
-    const auto& diag = s_boiler_mgr->diagnostics();
+    const auto& state = s_boiler_mgr->state();
     int64_t current_time_ms = esp_timer_get_time() / 1000;
 
     // Build JSON response
@@ -431,37 +434,65 @@ static esp_err_t diagnostics_api_handler(httpd_req_t* req) {
     *p++ = '{';
     remaining--;
 
-    // Format all diagnostic values
-    struct { const char* name; const ot::DiagnosticValue& val; } fields[] = {
-        {"t_boiler", diag.tBoiler}, {"t_return", diag.tReturn},
-        {"t_dhw", diag.tDhw}, {"t_dhw2", diag.tDhw2},
-        {"t_outside", diag.tOutside}, {"t_exhaust", diag.tExhaust},
-        {"t_heat_exchanger", diag.tHeatExchanger}, {"t_flow_ch2", diag.tFlowCh2},
-        {"t_storage", diag.tStorage}, {"t_collector", diag.tCollector},
-        {"t_setpoint", diag.tSetpoint}, {"modulation_level", diag.modulationLevel},
-        {"pressure", diag.pressure}, {"flow_rate", diag.flowRate},
-        {"fault_code", diag.faultCode}, {"diag_code", diag.diagCode},
-        {"burner_starts", diag.burnerStarts}, {"dhw_burner_starts", diag.dhwBurnerStarts},
-        {"ch_pump_starts", diag.chPumpStarts}, {"dhw_pump_starts", diag.dhwPumpStarts},
-        {"burner_hours", diag.burnerHours}, {"dhw_burner_hours", diag.dhwBurnerHours},
-        {"ch_pump_hours", diag.chPumpHours}, {"dhw_pump_hours", diag.dhwPumpHours},
-        {"max_capacity", diag.maxCapacity}, {"min_mod_level", diag.minModLevel},
-        {"fan_setpoint", diag.fanSetpoint}, {"fan_current", diag.fanCurrent},
-        {"fan_exhaust_rpm", diag.fanExhaustRpm}, {"fan_supply_rpm", diag.fanSupplyRpm},
-        {"co2_exhaust", diag.co2Exhaust}, {"flame_on", diag.flameOn},
-        {"ch_mode", diag.chMode}, {"dhw_mode", diag.dhwMode}
+    // Helper to append written data
+    auto append = [&](int w) {
+        if (w > 0 && static_cast<size_t>(w) < remaining) {
+            p += w;
+            remaining -= w;
+            return true;
+        }
+        return false;
     };
 
-    for (size_t i = 0; i < sizeof(fields) / sizeof(fields[0]); i++) {
+    // Format boolean flags
+    struct { const char* name; bool val; } bool_fields[] = {
+        {"fault", state.fault},
+        {"ch_mode", state.chActive},
+        {"dhw_mode", state.dhwActive},
+        {"flame_on", state.flameOn},
+        {"cooling_active", state.coolingActive},
+        {"ch2_active", state.ch2Active},
+        {"diagnostic_event", state.diagnosticEvent}
+    };
+
+    for (size_t i = 0; i < sizeof(bool_fields) / sizeof(bool_fields[0]); i++) {
         if (i > 0) {
             *p++ = ',';
             remaining--;
         }
-        written = format_diag_value(p, remaining, fields[i].name, fields[i].val, current_time_ms);
-        if (written > 0 && static_cast<size_t>(written) < remaining) {
-            p += written;
-            remaining -= written;
-        }
+        append(format_boiler_bool(p, remaining, bool_fields[i].name, bool_fields[i].val));
+    }
+
+    // Format value fields
+    struct { const char* name; const ot::BoilerStateValue& val; } value_fields[] = {
+        {"t_boiler", state.tBoiler}, {"t_return", state.tReturn},
+        {"t_dhw", state.tDhw}, {"t_dhw2", state.tDhw2},
+        {"t_outside", state.tOutside}, {"t_exhaust", state.tExhaust},
+        {"t_heat_exchanger", state.tHeatExchanger}, {"t_flow_ch2", state.tFlowCh2},
+        {"t_storage", state.tStorage}, {"t_collector", state.tCollector},
+        {"t_setpoint", state.tSetpoint}, {"modulation_level", state.modulationLevel},
+        {"pressure", state.pressure}, {"flow_rate", state.flowRate},
+        {"max_ch_water_temp", state.maxChWaterTemp},
+        {"fault_code", state.faultCode}, {"diag_code", state.diagCode},
+        {"burner_starts", state.burnerStarts}, {"dhw_burner_starts", state.dhwBurnerStarts},
+        {"ch_pump_starts", state.chPumpStarts}, {"dhw_pump_starts", state.dhwPumpStarts},
+        {"burner_hours", state.burnerHours}, {"dhw_burner_hours", state.dhwBurnerHours},
+        {"ch_pump_hours", state.chPumpHours}, {"dhw_pump_hours", state.dhwPumpHours},
+        {"max_capacity", state.maxCapacity}, {"min_mod_level", state.minModLevel},
+        {"fan_setpoint", state.fanSetpoint}, {"fan_current", state.fanCurrent},
+        {"fan_exhaust_rpm", state.fanExhaustRpm}, {"fan_supply_rpm", state.fanSupplyRpm},
+        {"co2_exhaust", state.co2Exhaust},
+        {"slave_member_id", state.slaveMemberId}, {"slave_config_flags", state.slaveConfigFlags},
+        {"slave_version", state.slaveVersion}, {"slave_type", state.slaveType},
+        {"slave_ot_version", state.slaveOTVersion},
+        {"dhw_set_ub", state.dhwSetUB}, {"dhw_set_lb", state.dhwSetLB},
+        {"max_t_set_ub", state.maxTSetUB}, {"max_t_set_lb", state.maxTSetLB}
+    };
+
+    for (size_t i = 0; i < sizeof(value_fields) / sizeof(value_fields[0]); i++) {
+        *p++ = ','; // Always comma after bool fields
+        remaining--;
+        append(format_boiler_value(p, remaining, value_fields[i].name, value_fields[i].val, current_time_ms));
     }
 
     *p++ = '}';

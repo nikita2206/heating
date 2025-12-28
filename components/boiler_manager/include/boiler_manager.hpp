@@ -276,7 +276,6 @@ public:
     [[nodiscard]] const BoilerState& state() const;
 
     // Control mode
-    void setControlEnabled(bool enabled);
     [[nodiscard]] ManagerStatus status() const;
     void setMode(ManagerMode mode);
 

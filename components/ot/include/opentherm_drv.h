@@ -12,6 +12,46 @@
 #include "driver/rmt_tx.h"
 #include "rmt_encoder.h"
 
+// OpenTherm Message IDs
+#define OT_FRAME_STATUS                     0
+#define OT_FRAME_TSET                       1
+#define OT_FRAME_SLAVE_CONFIG               3
+#define OT_FRAME_ASF_FLAGS                  5
+#define OT_FRAME_MAX_CAPACITY               15
+#define OT_FRAME_MODULATION                 17
+#define OT_FRAME_CH_PRESSURE                18
+#define OT_FRAME_DHW_FLOW_RATE              19
+#define OT_FRAME_T_BOILER                   25
+#define OT_FRAME_T_DHW                      26
+#define OT_FRAME_T_OUTSIDE                  27
+#define OT_FRAME_T_RET                      28
+#define OT_FRAME_T_STORAGE                  29
+#define OT_FRAME_T_COLLECTOR                30
+#define OT_FRAME_T_FLOW_CH2                 31
+#define OT_FRAME_T_DHW2                     32
+#define OT_FRAME_T_EXHAUST                  33
+#define OT_FRAME_T_HEAT_EXCHANGER           34
+#define OT_FRAME_FAN_SPEED                  35
+#define OT_FRAME_DHW_BOUNDS                 48
+#define OT_FRAME_CH_BOUNDS                  49
+#define OT_FRAME_MAX_CH_SETPOINT            57
+#define OT_FRAME_CO2_EXHAUST                79
+#define OT_FRAME_RPM_EXHAUST                84
+#define OT_FRAME_RPM_SUPPLY                 85
+#define OT_FRAME_OEM_DIAGNOSTIC             115
+#define OT_FRAME_BURNER_STARTS              116
+#define OT_FRAME_CH_PUMP_STARTS             117
+#define OT_FRAME_DHW_PUMP_STARTS            118
+#define OT_FRAME_DHW_BURNER_STARTS          119
+#define OT_FRAME_BURNER_HOURS               120
+#define OT_FRAME_CH_PUMP_HOURS              121
+#define OT_FRAME_DHW_PUMP_HOURS             122
+#define OT_FRAME_DHW_BURNER_HOURS           123
+#define OT_FRAME_SLAVE_OT_VERSION           125
+#define OT_FRAME_SLAVE_VERSION              127
+#define OT_FRAME_CUSTOM_200                 200
+#define OT_FRAME_CUSTOM_202                 202
+
 namespace ot {
 
 enum class OpenThermMessageType : uint8_t {
