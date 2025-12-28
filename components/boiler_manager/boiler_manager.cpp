@@ -65,6 +65,26 @@ enum class LoopState {
     WaitDiagResponse
 };
 
+static bool isAllowedControlId(uint8_t id) {
+    switch (id) {
+        case OT_FRAME_STATUS:
+        case OT_FRAME_TSET:
+        case OT_FRAME_MASTER_CONFIG: // 2
+        case OT_FRAME_SLAVE_CONFIG: // 3
+        case OT_FRAME_MAX_MODULATION: // 14
+        case OT_FRAME_MODULATION: // 17
+        case OT_FRAME_T_BOILER: // 25
+        case OT_FRAME_BRAND: // 93
+        case OT_FRAME_BRAND_VERSION: // 94
+        case OT_FRAME_BRAND_SERIAL_NUMBER: // 95
+        case OT_FRAME_SLAVE_OT_VERSION: // 125
+        case OT_FRAME_SLAVE_VERSION: // 127
+            return true;
+        default:
+            return false;
+    }
+}
+
 class BoilerManager::Impl {
 public:
     explicit Impl(const ManagerConfig& config)
@@ -129,6 +149,15 @@ public:
 
     const BoilerState& state() const { return boilerState_; }
     const ThermostatState& thermostatState() const { return thermostatState_; }
+    const ThermostatState& desiredState() const { return desiredBoilerState_; }
+
+    void setDesiredTSet(float tSet) {
+        desiredBoilerState_.tSet.update(tSet);
+    }
+
+    void setDesiredChEnable(bool enabled) {
+        desiredBoilerState_.chEnable = enabled;
+    }
 
     ManagerStatus status() const {
         ManagerStatus s;
@@ -180,6 +209,13 @@ public:
 
     void setMqttBridge(MqttBridge* mqtt) {
         mqttBridge_ = mqtt;
+        if (mqttBridge_) {
+            mqttBridge_->setDataUpdateCallback([this](float tSet, bool chEnable) {
+                setDesiredTSet(tSet);
+                setDesiredChEnable(chEnable);
+                ESP_LOGI(TAG, "Boiler desired state updated from MQTT: TSet=%.1f, CH=%d", tSet, chEnable);
+            });
+        }
     }
 
 private:
@@ -191,75 +227,179 @@ private:
 
     void taskFunction() {
         ESP_LOGI(TAG, "Main loop task started");
-        uint32_t loopCount = 0;
-        uint32_t validFrames = 0;
-        uint32_t invalidFrames = 0;
-
+        
         while (running_.load()) {
-            auto thermostatRequest = thermostat_->receive(500);
-
-            if (!thermostatRequest.has_value()) {
-                ESP_LOGI(TAG, "No request from thermostat in 500ms time");
-                continue;
-            }
-
-            logMessage("REQUEST", MessageSource::ThermostatBoiler, thermostatRequest.value());
-
-            // Capture demand from thermostat request
-            captureDemand(thermostatRequest.value());
-
-            // Intercept logic (Proxy Mode)
-            if (config_.mode == ManagerMode::Proxy &&
-                validFrames > 0 &&
-                (validFrames % config_.interceptRate == 0)) {
-
-                if (processInterception(thermostatRequest.value(), validFrames)) {
-                    continue; // Skip normal forwarding
-                }
-            }
-
-            int64_t t0 = esp_timer_get_time();
-
-            if (!boiler_->send(thermostatRequest.value())) {
-                invalidFrames++;
-                ESP_LOGW(TAG, "Couldn't send frame 0x%08lX to boiler, likely the TX queue is full", thermostatRequest.value().raw());
-                continue;
-            }
-
-            auto boilerResponse = boiler_->receive(250);
-            if (!boilerResponse.has_value()) {
-                invalidFrames++;
-                ESP_LOGW(TAG, "Couldn't get response from boiler in time 250ms");
-                logMessage("RESPONSE", MessageSource::ThermostatBoiler, OpenThermFrame(0));
-                continue;
-            }
-
-            int64_t t1 = esp_timer_get_time();
-
-            ESP_LOGD(TAG, "Boiler response: 0x%08lX (took %lld ms)", boilerResponse, (t1 - t0) / 1000);
-
-            logMessage("RESPONSE", MessageSource::ThermostatBoiler, boilerResponse.value());
-            parseDiagnosticResponse(boilerResponse.value().dataId(), boilerResponse.value());
-
-            if (thermostat_->send(boilerResponse.value())) {
-                ESP_LOGI(TAG, "Response queued to be sent to thermostat");
-                validFrames++;
+            if (config_.mode == ManagerMode::Control) {
+                runControlLoop();
             } else {
-                ESP_LOGW(TAG, "Couldn't send response to thermostat, likely the TX queue is full");
-                continue;
-            }
-
-            // Periodic status logging
-            loopCount++;
-            if (loopCount % 3000 == 0) {
-                ESP_LOGI(TAG, "Heartbeat: valid=%lu invalid=%lu gpio=%d",
-                         (unsigned long)validFrames,
-                         (unsigned long)invalidFrames,
-                         gpio_get_level(config_.thermostatInPin));
+                runProxyLoop();
             }
         }
 
         ESP_LOGI(TAG, "Main loop task stopped");
+    }
+
+    void runProxyLoop() {
+        auto thermostatRequest = thermostat_->receive(500);
+
+        if (!thermostatRequest.has_value()) {
+            // ESP_LOGI(TAG, "No request from thermostat in 500ms time");
+            return;
+        }
+
+        logMessage("REQUEST", MessageSource::ThermostatBoiler, thermostatRequest.value());
+
+        // Capture demand from thermostat request
+        captureDemand(thermostatRequest.value());
+
+        // Intercept logic (Proxy Mode)
+        if (config_.mode == ManagerMode::Proxy &&
+            validFrames_ > 0 &&
+            (validFrames_ % config_.interceptRate == 0)) {
+
+            if (processInterception(thermostatRequest.value(), validFrames_)) {
+                return; // Skip normal forwarding
+            }
+        }
+
+        int64_t t0 = esp_timer_get_time();
+
+        if (!boiler_->send(thermostatRequest.value())) {
+            invalidFrames_++;
+            ESP_LOGW(TAG, "Couldn't send frame 0x%08lX to boiler, likely the TX queue is full", thermostatRequest.value().raw());
+            return;
+        }
+
+        auto boilerResponse = boiler_->receive(250);
+        if (!boilerResponse.has_value()) {
+            invalidFrames_++;
+            ESP_LOGW(TAG, "Couldn't get response from boiler in time 250ms");
+            logMessage("RESPONSE", MessageSource::ThermostatBoiler, OpenThermFrame(0));
+            return;
+        }
+
+        int64_t t1 = esp_timer_get_time();
+
+        ESP_LOGD(TAG, "Boiler response: 0x%08lX (took %lld ms)", boilerResponse, (t1 - t0) / 1000);
+
+        logMessage("RESPONSE", MessageSource::ThermostatBoiler, boilerResponse.value());
+        parseDiagnosticResponse(boilerResponse.value().dataId(), boilerResponse.value());
+
+        if (thermostat_->send(boilerResponse.value())) {
+            ESP_LOGI(TAG, "Response queued to be sent to thermostat");
+            validFrames_++;
+        } else {
+            ESP_LOGW(TAG, "Couldn't send response to thermostat, likely the TX queue is full");
+            return;
+        }
+
+        // Periodic status logging
+        loopCount_++;
+        if (loopCount_ % 3000 == 0) {
+            ESP_LOGI(TAG, "Heartbeat: valid=%lu invalid=%lu gpio=%d",
+                     (unsigned long)validFrames_,
+                     (unsigned long)invalidFrames_,
+                     gpio_get_level(config_.thermostatInPin));
+        }
+    }
+
+    void runControlLoop() {
+        // 1. Check Thermostat (Non-blocking check, small timeout 10ms)
+        auto thermostatRequest = thermostat_->receive(10);
+        if (thermostatRequest.has_value()) {
+            handleThermostatRequestMock(thermostatRequest.value());
+        }
+
+        // 2. Manage Boiler
+        manageBoiler();
+    }
+
+    void handleThermostatRequestMock(const OpenThermFrame& request) {
+        logMessage("REQUEST", MessageSource::ThermostatGateway, request);
+        captureDemand(request);
+
+        if (isAllowedControlId(request.dataId())) {
+             // Mock response
+             OpenThermMessageType type = request.messageType();
+             OpenThermMessageType responseType = OpenThermMessageType::ReadAck;
+             uint16_t value = 0;
+             
+             if (type == OpenThermMessageType::WriteData) {
+                 responseType = OpenThermMessageType::WriteAck;
+                 value = request.dataValue(); // Echo value for write
+             }
+             
+             // Handle specific reads if needed
+             // For now, default 0 or echo is fine as "mock"
+             
+             OpenThermFrame response = OpenThermFrame::buildResponse(responseType, request.dataId(), value);
+             
+             logMessage("RESPONSE", MessageSource::ThermostatGateway, response);
+             thermostat_->send(response);
+             validFrames_++;
+        } else {
+             OpenThermFrame response = OpenThermFrame::buildResponse(OpenThermMessageType::UnknownId, request.dataId(), 0);
+             logMessage("RESPONSE", MessageSource::ThermostatGateway, response);
+             thermostat_->send(response);
+             invalidFrames_++;
+        }
+    }
+
+    void manageBoiler() {
+        int64_t now = esp_timer_get_time() / 1000;
+        if (now < nextBoilerPollTime_) {
+            return;
+        }
+
+        // Cycle through 0 -> 1 -> Diag
+        OpenThermFrame request;
+        MessageSource src = MessageSource::GatewayBoiler;
+
+        if (controlLoopStep_ == 0) {
+            // Send Status (ID 0)
+            // We are Master to Boiler. We send WriteData ID 0.
+            // Payload: MasterStatus (high byte).
+            // We construct MasterStatus from desiredBoilerState_.
+            uint8_t masterStatus = 0;
+            if (desiredBoilerState_.chEnable) masterStatus |= 0x01;
+            if (desiredBoilerState_.dhwEnable) masterStatus |= 0x02;
+            if (desiredBoilerState_.coolingEnable) masterStatus |= 0x04;
+            if (desiredBoilerState_.otcActive) masterStatus |= 0x08;
+            if (desiredBoilerState_.ch2Enable) masterStatus |= 0x10;
+            
+            request = OpenThermFrame::buildRequest(OpenThermMessageType::WriteData, OT_FRAME_STATUS, (uint16_t)masterStatus << 8);
+            controlLoopStep_ = 1;
+        } else if (controlLoopStep_ == 1) {
+            // Send TSet (ID 1)
+            // Use desiredBoilerState_.tSet
+            float tSet = desiredBoilerState_.tSet.asFloatOr(0.0f);
+            // Convert to f8.8
+            uint16_t data = 0;
+            if (tSet >= 0) {
+                 data = (uint16_t)(tSet * 256.0f);
+            }
+            request = OpenThermFrame::buildRequest(OpenThermMessageType::WriteData, OT_FRAME_TSET, data);
+            controlLoopStep_ = 2;
+        } else {
+             // Send Diagnostic
+             uint8_t dataId = DIAG_COMMANDS[currentDiagIndex_];
+             currentDiagIndex_ = (currentDiagIndex_ + 1) % DIAG_COMMANDS_COUNT;
+             request = OpenThermFrame::buildRequest(OpenThermMessageType::ReadData, dataId, 0);
+             controlLoopStep_ = 0;
+        }
+
+        logMessage("REQUEST", src, request);
+        if (boiler_->send(request)) {
+             auto response = boiler_->receive(250);
+             if (response.has_value()) {
+                 logMessage("RESPONSE", src, response.value());
+                 parseDiagnosticResponse(response.value().dataId(), response.value());
+             } else {
+                 ESP_LOGW(TAG, "Boiler control loop timeout (ID %d)", request.dataId());
+             }
+        }
+        
+        nextBoilerPollTime_ = (esp_timer_get_time() / 1000) + 1000; // 1s delay
     }
 
     bool processInterception(const OpenThermFrame& request, uint32_t& validFrames) {
@@ -614,11 +754,21 @@ private:
 
     BoilerState boilerState_;
     ThermostatState thermostatState_;
+    ThermostatState desiredBoilerState_;
     // Callback (for logging)
     MessageCallback messageCallback_;
     // MQTT bridge for publishing diagnostics
     MqttBridge* mqttBridge_ = nullptr;
     size_t currentDiagIndex_ = 0;
+
+    // Stats
+    uint32_t loopCount_ = 0;
+    uint32_t validFrames_ = 0;
+    uint32_t invalidFrames_ = 0;
+
+    // Control Mode State
+    int64_t nextBoilerPollTime_ = 0;
+    int controlLoopStep_ = 0; // 0: Status, 1: TSet, 2: Diag
 };
 
 // BoilerManager implementation
@@ -652,12 +802,24 @@ const ThermostatState& BoilerManager::thermostatState() const {
     return impl_->thermostatState();
 }
 
+const ThermostatState& BoilerManager::desiredState() const {
+    return impl_->desiredState();
+}
+
 ManagerStatus BoilerManager::status() const {
     return impl_->status();
 }
 
 void BoilerManager::setMode(ManagerMode mode) {
     impl_->setMode(mode);
+}
+
+void BoilerManager::setDesiredTSet(float tSet) {
+    impl_->setDesiredTSet(tSet);
+}
+
+void BoilerManager::setDesiredChEnable(bool enabled) {
+    impl_->setDesiredChEnable(enabled);
 }
 
 esp_err_t BoilerManager::writeData(uint8_t dataId, uint16_t dataValue,

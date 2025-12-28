@@ -165,6 +165,10 @@ public:
         controlCallback_ = std::move(callback);
     }
 
+    void setDataUpdateCallback(DataUpdateCallback callback) {
+        dataCallback_ = std::move(callback);
+    }
+
     void publishControlState(bool enabled) {
         if (!client_ || !state_.connected) {
             return;
@@ -201,18 +205,34 @@ private:
     }
 
     void setTset(float value) {
+        bool changed = false;
         if (mutex_ && xSemaphoreTake(mutex_, pdMS_TO_TICKS(50)) == pdTRUE) {
-            state_.lastTsetC = value;
-            state_.lastUpdateTime = std::chrono::milliseconds(esp_timer_get_time() / 1000);
+            if (!state_.lastTsetC.has_value() || state_.lastTsetC.value() != value) {
+                state_.lastTsetC = value;
+                state_.lastUpdateTime = std::chrono::milliseconds(esp_timer_get_time() / 1000);
+                changed = true;
+            }
             xSemaphoreGive(mutex_);
+        }
+        if (changed && dataCallback_) {
+            bool ch = state_.lastChEnable.value_or(false);
+            dataCallback_(value, ch);
         }
     }
 
     void setChEnable(bool enabled) {
+        bool changed = false;
         if (mutex_ && xSemaphoreTake(mutex_, pdMS_TO_TICKS(50)) == pdTRUE) {
-            state_.lastChEnable = enabled;
-            state_.lastUpdateTime = std::chrono::milliseconds(esp_timer_get_time() / 1000);
+            if (!state_.lastChEnable.has_value() || state_.lastChEnable.value() != enabled) {
+                state_.lastChEnable = enabled;
+                state_.lastUpdateTime = std::chrono::milliseconds(esp_timer_get_time() / 1000);
+                changed = true;
+            }
             xSemaphoreGive(mutex_);
+        }
+        if (changed && dataCallback_) {
+            float tset = state_.lastTsetC.value_or(0.0f);
+            dataCallback_(tset, enabled);
         }
     }
 
@@ -405,6 +425,7 @@ private:
     esp_mqtt_client_handle_t client_ = nullptr;
     bool running_ = false;
     ControlModeCallback controlCallback_;
+    DataUpdateCallback dataCallback_;
 
     // Topics
     std::string topicTsetCmd_;
@@ -458,6 +479,10 @@ esp_err_t MqttBridge::publishBinarySensor(std::string_view id, std::string_view 
 
 void MqttBridge::setControlCallback(ControlModeCallback callback) {
     impl_->setControlCallback(std::move(callback));
+}
+
+void MqttBridge::setDataUpdateCallback(DataUpdateCallback callback) {
+    impl_->setDataUpdateCallback(std::move(callback));
 }
 
 void MqttBridge::publishControlState(bool enabled) {

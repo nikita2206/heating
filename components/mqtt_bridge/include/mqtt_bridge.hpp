@@ -52,6 +52,9 @@ struct MqttState {
 // Callback for control mode changes
 using ControlModeCallback = std::function<void(bool enabled)>;
 
+// Callback for data updates (TSet, CH Enable)
+using DataUpdateCallback = std::function<void(float tSet, bool chEnable)>;
+
 /**
  * RAII MQTT client wrapper
  *
@@ -88,6 +91,9 @@ public:
 
     // Control mode callback
     void setControlCallback(ControlModeCallback callback);
+
+    // Data update callback
+    void setDataUpdateCallback(DataUpdateCallback callback);
 
     // Publish control state (for UI sync)
     void publishControlState(bool enabled);

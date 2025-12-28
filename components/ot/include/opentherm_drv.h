@@ -15,9 +15,11 @@
 // OpenTherm Message IDs
 #define OT_FRAME_STATUS                     0
 #define OT_FRAME_TSET                       1
+#define OT_FRAME_MASTER_CONFIG              2
 #define OT_FRAME_SLAVE_CONFIG               3
 #define OT_FRAME_ASF_FLAGS                  5
 #define OT_FRAME_MAX_CAPACITY               15
+#define OT_FRAME_MAX_MODULATION             14
 #define OT_FRAME_MODULATION                 17
 #define OT_FRAME_CH_PRESSURE                18
 #define OT_FRAME_DHW_FLOW_RATE              19
@@ -39,6 +41,9 @@
 #define OT_FRAME_CO2_EXHAUST                79
 #define OT_FRAME_RPM_EXHAUST                84
 #define OT_FRAME_RPM_SUPPLY                 85
+#define OT_FRAME_BRAND                      93
+#define OT_FRAME_BRAND_VERSION              94
+#define OT_FRAME_BRAND_SERIAL_NUMBER        95
 #define OT_FRAME_OEM_DIAGNOSTIC             115
 #define OT_FRAME_BURNER_STARTS              116
 #define OT_FRAME_CH_PUMP_STARTS             117

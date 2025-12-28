@@ -222,6 +222,11 @@ public:
     [[nodiscard]] ManagerStatus status() const;
     void setMode(ManagerMode mode);
 
+    // Control overrides
+    void setDesiredTSet(float tSet);
+    void setDesiredChEnable(bool enabled);
+    [[nodiscard]] const ThermostatState& desiredState() const;
+
     // Manual write to boiler (thread-safe, blocks up to timeout)
     [[nodiscard]] esp_err_t writeData(uint8_t dataId, uint16_t dataValue,
                                       std::optional<OpenThermFrame>& response,
