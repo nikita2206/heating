@@ -83,16 +83,13 @@ function updateDiagnostics() {
 
       // Temperatures
       if (d.t_boiler) temps.innerHTML += renderDiagCard('Boiler Temp', d.t_boiler, '°C');
+      if (d.t_setpoint) temps.innerHTML += renderDiagCard('Setpoint Temp', d.t_setpoint, '°C');
       if (d.t_return) temps.innerHTML += renderDiagCard('Return Temp', d.t_return, '°C');
       if (d.t_dhw) temps.innerHTML += renderDiagCard('DHW Temp', d.t_dhw, '°C');
       if (d.t_outside) temps.innerHTML += renderDiagCard('Outside Temp', d.t_outside, '°C');
       if (d.t_exhaust) temps.innerHTML += renderDiagCard('Exhaust Temp', d.t_exhaust, '°C');
-      if (d.t_setpoint) temps.innerHTML += renderDiagCard('Setpoint Temp', d.t_setpoint, '°C');
 
       // Status
-      if (d.modulation_level) status.innerHTML += renderDiagCard('Modulation Level', d.modulation_level, '%');
-      if (d.pressure) status.innerHTML += renderDiagCard('Pressure', d.pressure, 'bar');
-      if (d.flow_rate) status.innerHTML += renderDiagCard('DHW Flow Rate', d.flow_rate, 'L/min');
       if (d.flame_on) {
         const flameStatus = d.flame_on.value > 0.5 ? '🔥 ON' : 'OFF';
         status.innerHTML += `
@@ -123,8 +120,50 @@ function updateDiagnostics() {
           </div>
         `;
       }
+      if (d.modulation_level) status.innerHTML += renderDiagCard('Modulation Level', d.modulation_level, '%');
+      if (d.pressure) status.innerHTML += renderDiagCard('Pressure', d.pressure, 'bar');
+      if (d.flow_rate) status.innerHTML += renderDiagCard('DHW Flow Rate', d.flow_rate, 'L/min');
+      if (d.cooling_active) {
+        const coolingStatus = d.cooling_active.value > 0.5 ? 'ACTIVE' : 'OFF';
+        status.innerHTML += `
+          <div class="diag-card">
+            <div class="diag-label">Cooling</div>
+            <span class="diag-value">${coolingStatus}</span>
+            ${formatTimestamp(d.cooling_active.age_ms)}
+          </div>
+        `;
+      }
+      if (d.ch2_active) {
+        const ch2Status = d.ch2_active.value > 0.5 ? 'ACTIVE' : 'OFF';
+        status.innerHTML += `
+          <div class="diag-card">
+            <div class="diag-label">CH2 Mode</div>
+            <span class="diag-value">${ch2Status}</span>
+            ${formatTimestamp(d.ch2_active.age_ms)}
+          </div>
+        `;
+      }
+      if (d.diagnostic_event) {
+        const diagStatus = d.diagnostic_event.value > 0.5 ? 'YES' : 'NO';
+        status.innerHTML += `
+          <div class="diag-card">
+            <div class="diag-label">Diag Event</div>
+            <span class="diag-value">${diagStatus}</span>
+            ${formatTimestamp(d.diagnostic_event.age_ms)}
+          </div>
+        `;
+      }
 
       // Faults
+      if (d.fault && d.fault.value > 0.5) {
+        faults.innerHTML += `
+          <div class="diag-card">
+            <div class="diag-label">Fault Status</div>
+            <span class="diag-value" style="color:#ef4444">FAULT</span>
+            ${formatTimestamp(d.fault.age_ms)}
+          </div>
+        `;
+      }
       if (d.fault_code) faults.innerHTML += renderDiagCard('Fault Code', d.fault_code, '');
       if (d.diag_code) faults.innerHTML += renderDiagCard('Diagnostic Code', d.diag_code, '');
 
@@ -138,40 +177,69 @@ function updateDiagnostics() {
 
       // All values table
       const allItems = [
+        // Primary Status
+        { key: 'Flame Status', val: d.flame_on, unit: '', format: (v) => v > 0.5 ? '🔥 ON' : 'OFF' },
+        { key: 'CH Mode', val: d.ch_mode, unit: '', format: (v) => v > 0.5 ? 'ACTIVE' : 'OFF' },
+        { key: 'DHW Mode', val: d.dhw_mode, unit: '', format: (v) => v > 0.5 ? 'ACTIVE' : 'OFF' },
+        { key: 'Cooling Active', val: d.cooling_active, unit: '', format: (v) => v > 0.5 ? 'ACTIVE' : 'OFF' },
+        { key: 'CH2 Active', val: d.ch2_active, unit: '', format: (v) => v > 0.5 ? 'ACTIVE' : 'OFF' },
+        { key: 'Diagnostic Event', val: d.diagnostic_event, unit: '', format: (v) => v > 0.5 ? 'YES' : 'NO' },
+        { key: 'Fault Status', val: d.fault, unit: '', format: (v) => v > 0.5 ? 'FAULT' : 'OK' },
+
+        // Temperatures (Primary)
         { key: 'Boiler Temp', val: d.t_boiler, unit: '°C' },
+        { key: 'Setpoint Temp', val: d.t_setpoint, unit: '°C' },
         { key: 'Return Temp', val: d.t_return, unit: '°C' },
         { key: 'DHW Temp', val: d.t_dhw, unit: '°C' },
-        { key: 'DHW Temp 2', val: d.t_dhw2, unit: '°C' },
         { key: 'Outside Temp', val: d.t_outside, unit: '°C' },
+
+        // System Values
+        { key: 'Modulation Level', val: d.modulation_level, unit: '%' },
+        { key: 'Pressure', val: d.pressure, unit: 'bar' },
+        { key: 'DHW Flow Rate', val: d.flow_rate, unit: 'L/min' },
+
+        // Secondary Temperatures
         { key: 'Exhaust Temp', val: d.t_exhaust, unit: '°C' },
+        { key: 'DHW Temp 2', val: d.t_dhw2, unit: '°C' },
         { key: 'Heat Exchanger Temp', val: d.t_heat_exchanger, unit: '°C' },
         { key: 'CH2 Flow Temp', val: d.t_flow_ch2, unit: '°C' },
         { key: 'Storage Temp', val: d.t_storage, unit: '°C' },
         { key: 'Collector Temp', val: d.t_collector, unit: '°C' },
-        { key: 'Setpoint Temp', val: d.t_setpoint, unit: '°C' },
-        { key: 'Modulation Level', val: d.modulation_level, unit: '%' },
-        { key: 'Pressure', val: d.pressure, unit: 'bar' },
-        { key: 'DHW Flow Rate', val: d.flow_rate, unit: 'L/min' },
-        { key: 'Flame Status', val: d.flame_on, unit: '', format: (v) => v > 0.5 ? '🔥 ON' : 'OFF' },
-        { key: 'CH Mode', val: d.ch_mode, unit: '', format: (v) => v > 0.5 ? 'ACTIVE' : 'OFF' },
-        { key: 'DHW Mode', val: d.dhw_mode, unit: '', format: (v) => v > 0.5 ? 'ACTIVE' : 'OFF' },
+        
+        // Fans & Air
+        { key: 'Fan Speed', val: d.fan_current, unit: '%' },
+        { key: 'Fan Setpoint', val: d.fan_setpoint, unit: '%' },
+        { key: 'Fan Supply RPM', val: d.fan_supply_rpm, unit: 'rpm' },
+        { key: 'Fan Exhaust RPM', val: d.fan_exhaust_rpm, unit: 'rpm' },
+        { key: 'CO2 Exhaust', val: d.co2_exhaust, unit: 'ppm' },
+
+        // Counters (Stats)
+        { key: 'Burner Hours', val: d.burner_hours, unit: 'h' },
+        { key: 'Burner Starts', val: d.burner_starts, unit: '' },
+        { key: 'DHW Burner Hours', val: d.dhw_burner_hours, unit: 'h' },
+        { key: 'DHW Burner Starts', val: d.dhw_burner_starts, unit: '' },
+        { key: 'CH Pump Hours', val: d.ch_pump_hours, unit: 'h' },
+        { key: 'CH Pump Starts', val: d.ch_pump_starts, unit: '' },
+        { key: 'DHW Pump Hours', val: d.dhw_pump_hours, unit: 'h' },
+        { key: 'DHW Pump Starts', val: d.dhw_pump_starts, unit: '' },
+
+        // Faults & Limits
         { key: 'Fault Code', val: d.fault_code, unit: '' },
         { key: 'Diagnostic Code', val: d.diag_code, unit: '' },
-        { key: 'Burner Starts', val: d.burner_starts, unit: '' },
-        { key: 'DHW Burner Starts', val: d.dhw_burner_starts, unit: '' },
-        { key: 'CH Pump Starts', val: d.ch_pump_starts, unit: '' },
-        { key: 'DHW Pump Starts', val: d.dhw_pump_starts, unit: '' },
-        { key: 'Burner Hours', val: d.burner_hours, unit: 'h' },
-        { key: 'DHW Burner Hours', val: d.dhw_burner_hours, unit: 'h' },
-        { key: 'CH Pump Hours', val: d.ch_pump_hours, unit: 'h' },
-        { key: 'DHW Pump Hours', val: d.dhw_pump_hours, unit: 'h' },
         { key: 'Max Capacity', val: d.max_capacity, unit: 'kW' },
         { key: 'Min Mod Level', val: d.min_mod_level, unit: '%' },
-        { key: 'Fan Setpoint', val: d.fan_setpoint, unit: '%' },
-        { key: 'Fan Current', val: d.fan_current, unit: '%' },
-        { key: 'Fan Exhaust RPM', val: d.fan_exhaust_rpm, unit: 'rpm' },
-        { key: 'Fan Supply RPM', val: d.fan_supply_rpm, unit: 'rpm' },
-        { key: 'CO2 Exhaust', val: d.co2_exhaust, unit: 'ppm' }
+        { key: 'Max CH Water Temp', val: d.max_ch_water_temp, unit: '°C' },
+        { key: 'DHW Setpoint UB', val: d.dhw_set_ub, unit: '°C' },
+        { key: 'DHW Setpoint LB', val: d.dhw_set_lb, unit: '°C' },
+        { key: 'Max CH Setpoint UB', val: d.max_t_set_ub, unit: '°C' },
+        { key: 'Max CH Setpoint LB', val: d.max_t_set_lb, unit: '°C' },
+
+        // Slave Info
+        { key: 'Slave Member ID', val: d.slave_member_id, unit: '' },
+        { key: 'Slave Config Flags', val: d.slave_config_flags, unit: '' },
+        { key: 'Slave Version', val: d.slave_version, unit: '' },
+        { key: 'Slave Type', val: d.slave_type, unit: '' },
+        { key: 'Slave OT Version', val: d.slave_ot_version, unit: '' }
       ];
 
       allItems.forEach(item => {
