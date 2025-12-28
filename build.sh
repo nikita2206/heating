@@ -1,5 +1,5 @@
 #!/bin/bash
-# Build script for OpenTherm Gateway firmware
+# Build script for Gorynych firmware
 # Builds web UI (if needed) and ESP-IDF firmware
 
 set -e
@@ -124,7 +124,7 @@ idf.py build
 
 echo ""
 print_step "Build complete!"
-echo "  Firmware: $SCRIPT_DIR/build/opentherm_gateway.bin"
+echo "  Firmware: $SCRIPT_DIR/build/gorynych.bin"
 echo ""
 echo "To flash: idf.py flash"
 echo "To monitor: idf.py monitor"

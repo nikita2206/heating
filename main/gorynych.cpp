@@ -1,5 +1,5 @@
 /*
- * OpenTherm Gateway - C++ Main Application
+ * Gorynych - C++ Main Application
  *
  * Multi-thread architecture:
  * 1. Thermostat task - handles communication with thermostat (BLOCKING)
@@ -25,7 +25,7 @@
 #include "esp_event.h"
 #include "nvs_flash.h"
 
-#include "opentherm_gateway.h"
+#include "gorynych.h"
 #include "boiler_manager.hpp"
 #include "mqtt_bridge.hpp"
 
@@ -40,7 +40,7 @@ extern "C" {
 
 #include "sdkconfig.h"
 
-static const char* TAG = "OT_GATEWAY";
+static const char* TAG = "GORYNYCH";
 
 // WiFi event group
 static EventGroupHandle_t s_wifi_event_group;
@@ -56,7 +56,7 @@ static std::unique_ptr<ot::MqttBridge> s_mqtt;
 
 
 #if CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG
-extern "C" esp_err_t opentherm_gateway_console_init(void) {
+extern "C" esp_err_t gorynych_console_init(void) {
     setvbuf(stdin, nullptr, _IONBF, 0);
 
     usb_serial_jtag_vfs_set_rx_line_endings(ESP_LINE_ENDINGS_CR);
@@ -156,7 +156,7 @@ static void opentherm_message_callback(std::string_view direction, ot::MessageSo
 
 // Initialize and start the gateway
 static void start_gateway() {
-    ESP_LOGI(TAG, "Starting OpenTherm gateway (C++ implementation)");
+    ESP_LOGI(TAG, "Starting Gorynych (C++ implementation)");
 
     // Start MQTT bridge
     ot::MqttConfig mqtt_cfg;
@@ -207,14 +207,14 @@ static void start_gateway() {
     }
     ESP_LOGI(TAG, "Main loop started");
 
-    ESP_LOGI(TAG, "OpenTherm gateway running");
+    ESP_LOGI(TAG, "Gorynych running");
     ESP_LOGI(TAG, "  Thermostat side: RX=GPIO%d, TX=GPIO%d", OT_MASTER_IN_PIN, OT_MASTER_OUT_PIN);
     ESP_LOGI(TAG, "  Boiler side: RX=GPIO%d, TX=GPIO%d", OT_SLAVE_IN_PIN, OT_SLAVE_OUT_PIN);
     ESP_LOGI(TAG, "  Web UI: http://<device-ip>/");
 }
 
 extern "C" void app_main() {
-    ESP_LOGI(TAG, "OpenTherm Gateway starting...");
+    ESP_LOGI(TAG, "Gorynych starting...");
     ESP_LOGI(TAG, "Firmware version: %s", ota_update_get_version());
 
     // Validate OTA state
@@ -229,7 +229,7 @@ extern "C" void app_main() {
     ESP_ERROR_CHECK(ret);
 
 #if CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG
-    ESP_ERROR_CHECK(opentherm_gateway_console_init());
+    ESP_ERROR_CHECK(gorynych_console_init());
 #endif
 
     // Initialize WiFi
@@ -242,5 +242,5 @@ extern "C" void app_main() {
     // Start the gateway
     start_gateway();
 
-    ESP_LOGI(TAG, "OpenTherm Gateway initialized");
+    ESP_LOGI(TAG, "Gorynych initialized");
 }

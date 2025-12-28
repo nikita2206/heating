@@ -1,310 +1,112 @@
-# OpenTherm Gateway with WiFi and WebSocket Logging
+# Gorynych (OpenTherm Gateway)
 
-ESP-IDF project implementing an OpenTherm gateway that sits between a thermostat and boiler, proxying OpenTherm communication while providing real-time monitoring, diagnostics, and MQTT integration.
+Gorynych is a WiFi-enabled OpenTherm gateway based on ESP32 that sits between your thermostat and boiler. It acts as a transparent proxy, allowing you to monitor and control your heating system via a modern Web UI and MQTT without disrupting normal operation.
 
 ## Features
 
-- **OpenTherm Gateway**: Transparent proxy between thermostat (master) and boiler (slave)
-- **Swappable Backends**: Choose between RMT hardware-based or software-based OpenTherm implementations
-- **WiFi Connectivity**: WPA2/WPA3 support with automatic reconnection
-- **WebSocket Server**: Real-time message streaming to connected clients
-- **MQTT Integration**: Publish OpenTherm data to MQTT broker for home automation
-- **Web Interface**: Built-in monitoring page with live OpenTherm traffic
-- **Boiler Manager**: Advanced diagnostics and control features
-  - Manual write injection for testing
-  - Direct diagnostic polling independent of thermostat
-  - Response injection for gateway modifications
-- **OTA Updates**: Over-the-air firmware updates via HTTP
+- **Transparent Proxy**: Seamlessly intercepts OpenTherm communication.
+- **Real-time Dashboard**: Web UI (React/Vite) showing boiler status, temperatures, pressure, and modulation.
+- **Live Frame Logging**: Watch raw OpenTherm traffic via WebSocket in real-time.
+- **MQTT Integration**: Publish telemetry to Home Assistant and control setpoints remotely.
+- **Boiler Control**:
+  - **Manual Write**: Inject custom OpenTherm commands via API.
+  - **Diagnostics**: Periodically queries boiler for extended data (e.g., fault codes, OEM info).
+  - **Override**: Optional MQTT control mode to take over thermostat functions.
+- **OTA Updates**: Wireless firmware updates via Web UI.
 
-## Architecture
+## Hardware
 
-The project uses a modular component-based architecture:
+- **MCU**: ESP32
+- **OpenTherm Adapter**: Requires two OpenTherm interfaces (one for Master/Thermostat, one for Slave/Boiler).
+  - Typical design uses optocouplers for isolation.
+  - [Hardware Schematic Reference](https://github.com/ihormelnyk/opentherm_library/tree/master/hardware)
 
-```
-┌─────────────────────┐
-│ opentherm_gateway.c │  Main application
-└──────────┬──────────┘
-           │
-    ┌──────┴──────┬────────────┬──────────────┬────────────┐
-    │             │            │              │            │
-┌───▼─────┐  ┌────▼───────┐  ┌─▼──────────┐  ┌▼────────┐  ┌▼────────┐
-│opentherm│  │boiler_mgr  │  │websocket   │  │mqtt     │  │ota      │
-│ (API)   │  │            │  │ _server    │  │ _bridge │  │ _update │
-└───┬─────┘  └────────────┘  └────────────┘  └─────────┘  └─────────┘
-    │
-    ├─RMT impl ──────► opentherm_rmt (hardware-based)
-    │
-    └─Library impl ──► opentherm_library (ISR based)
-```
+### Pinout (Default)
 
-### Components
+| Function | ESP32 Pin    | Description |
+|----------|--------------|-------------|
+| **Master RX** | GPIO 25 | Input from Thermostat |
+| **Master TX** | GPIO 26 | Output to Thermostat |
+| **Slave RX** | GPIO 13 | Input from Boiler |
+| **Slave TX** | GPIO 14 | Output to Boiler |
 
-- **opentherm**: Generic API abstraction layer for OpenTherm communication
-  - `opentherm_rmt`: Hardware RMT peripheral implementation (precise timing)
-  - `opentherm_library`: Pure ESP-IDF software implementation
-- **boiler_manager**: Diagnostic injection, state management, and boiler control
-- **websocket_server**: Real-time logging and monitoring over WebSocket
-- **mqtt_bridge**: Publish OpenTherm telemetry to MQTT topics
-- **ota_update**: Over-the-air firmware update functionality
-
-## Hardware Requirements
-
-1. **ESP32 Development Board** (ESP32, ESP32-S2, ESP32-C3, etc.)
-2. **OpenTherm Interface Circuits** (x2) - One for thermostat side, one for boiler side
-   - Hardware schematic: https://github.com/ihormelnyk/opentherm_library/tree/master/hardware
-   - Handles 7-15V OpenTherm ↔ 3.3V ESP32 level shifting
-3. **Default GPIO Pins**:
-   - Thermostat side: GPIO4 (RX), GPIO5 (TX)
-   - Boiler side: GPIO18 (RX), GPIO19 (TX)
-
-### Wiring
-
-```
-Thermostat ←→ OpenTherm Interface 1 ←→ ESP32 (GPIO4/5) ←→ OpenTherm Interface 2 ←→ Boiler
-```
-
-## Software Setup
-
-### Prerequisites
-
-- ESP-IDF v5.0 or later
-- Python 3.8+
-
-### Configuration
-
-Run `idf.py menuconfig` to configure:
-
-1. **OpenTherm Implementation** (`OpenTherm Implementation` menu):
-   - RMT (Hardware-based) - default, uses ESP32 RMT peripheral
-   - Library - pure ESP-IDF software implementation
-
-2. **WiFi Settings** (`OpenTherm Gateway Configuration` menu):
-   - WiFi SSID
-   - WiFi Password
-
-3. **MQTT Settings** (`OpenTherm Gateway Configuration` menu):
-   - MQTT Broker URI (e.g., `mqtt://192.168.1.100:1883`)
-   - MQTT Username (optional)
-   - MQTT Password (optional)
-
-4. **GPIO Pins** (optional, in code):
-   Edit `main/opentherm_gateway.c` if default pins don't match your hardware.
-
-### Building and Flashing
-
-```bash
-# Configure
-idf.py menuconfig
-
-# Build
-idf.py build
-
-# Flash and monitor
-idf.py flash monitor
-```
-
-## Usage
-
-### Initial Setup
-
-1. Flash firmware to ESP32
-2. Connect hardware:
-   - Thermostat to GPIO4/5 via OpenTherm interface
-   - Boiler to GPIO18/19 via OpenTherm interface
-3. Power on and watch serial console for WiFi connection
-4. Note the device IP address
-
-### Web Interface
-
-Navigate to `http://<device-ip>/` to access the monitoring interface:
-- Real-time OpenTherm message display
-- Request/Response pairs with timestamps
-- Message type, Data ID, and parsed values
-- Raw hex frame data
-
-### MQTT Integration
-
-OpenTherm data is published to MQTT topics (if MQTT is configured):
-
-```
-opentherm/status             - Connection and gateway status
-opentherm/messages           - All OpenTherm messages (JSON)
-opentherm/boiler/temperature - Boiler water temperature
-opentherm/boiler/pressure    - System pressure
-opentherm/thermostat/setpoint - Temperature setpoint
-opentherm/room/temperature   - Room temperature
-```
-
-### Boiler Manager Features
-
-The boiler manager component provides advanced functionality:
-
-**Manual Write Injection**: Send custom OpenTherm write commands to the boiler for testing purposes.
-
-**Direct Diagnostic Polling**: Query boiler diagnostics independently of the thermostat's normal communication cycle.
-
-**Response Injection**: Modify gateway behavior by injecting custom responses (e.g., virtual sensors, override values).
-
-These features enable:
-- Testing boiler capabilities
-- Implementing custom control logic
-- Multi-room temperature averaging
-- Advanced diagnostics
-
-## OpenTherm Message Format
-
-### Message Structure
-
-```
-[Timestamp] [Direction] Type=TYPE DataID=XX Value=YY (0xZZZZZZZZ)
-```
-
-- **Timestamp**: Milliseconds since boot
-- **Direction**: `→ REQUEST` or `← RESPONSE`
-- **Type**: Message type (READ_DATA, READ_ACK, WRITE_DATA, etc.)
-- **DataID**: OpenTherm data identifier (0-127)
-- **Value**: Parsed value with units
-- **Raw**: 32-bit hex frame
-
-### Common Data IDs
-
-| ID | Name | Description | Type |
-|----|------|-------------|------|
-| 0 | Status | Master/Slave status flags | READ |
-| 1 | TSet | Control setpoint (°C) | WRITE |
-| 17 | RelModLevel | Relative modulation level (%) | READ |
-| 24 | TRoom | Room temperature (°C) | WRITE |
-| 25 | Tboiler | Boiler water temperature (°C) | READ |
-| 26 | Tdhw | DHW temperature (°C) | READ |
-| 27 | Toutside | Outside temperature (°C) | WRITE |
-| 28 | Tret | Return water temperature (°C) | READ |
-
-Full specification: https://www.opentherm.eu/
+*Note: Pins can be changed in `main/gorynych.h`.*
 
 ## Project Structure
 
 ```
-project/
-├── components/
-│   ├── opentherm/              # Generic OpenTherm API
-│   │   ├── include/
-│   │   │   ├── opentherm_api.h
-│   │   │   └── opentherm_types.h
-│   │   ├── opentherm_rmt_impl.c
-│   │   ├── opentherm_lib_impl.cpp
-│   │   ├── Kconfig
-│   │   └── CMakeLists.txt
-│   ├── opentherm_rmt/          # RMT hardware implementation
-│   │   ├── include/
-│   │   │   ├── opentherm_rmt.h
-│   │   │   └── opentherm.h
-│   │   ├── opentherm_rmt.c
-│   │   ├── opentherm.c
-│   │   └── CMakeLists.txt
-│   ├── opentherm_library/      # Pure ESP-IDF implementation
-│   │   ├── src/
-│   │   │   ├── opentherm_lib.h
-│   │   │   └── opentherm_lib.cpp
-│   │   ├── idf_component.yml
-│   │   └── CMakeLists.txt
-│   ├── boiler_manager/         # Diagnostics and control
-│   ├── websocket_server/       # WebSocket logging
-│   ├── mqtt_bridge/            # MQTT integration
-│   └── ota_update/             # OTA firmware updates
 ├── main/
-│   ├── opentherm_gateway.c     # Main application
-│   ├── opentherm_gateway.h
-│   ├── Kconfig.projbuild
-│   └── CMakeLists.txt
-├── CMakeLists.txt
-├── sdkconfig.defaults
-└── README.md
+│   ├── gorynych.cpp         # Main application entry
+│   └── gorynych.h           # Pin definitions & config
+├── components/
+│   ├── ot/                  # OpenTherm RMT driver (Hardware-timed)
+│   ├── boiler_manager/      # State machine, diagnostics, proxy logic
+│   ├── websocket_server/    # Web server, JSON API, WebSocket
+│   ├── mqtt_bridge/         # MQTT client implementation
+│   └── web_ui/              # Embedded assets wrapper
+├── web-ui/                  # React + Vite Frontend
+└── build.sh                 # Unified build script
 ```
 
-## Switching OpenTherm Implementations
+## Getting Started
 
-The project supports two OpenTherm backends:
+### Prerequisites
+- **ESP-IDF v5.0+**
+- **Node.js** (for building Web UI)
 
-### RMT Implementation (Default)
-- Uses ESP32 RMT peripheral for hardware-timed signal generation
-- Precise timing, minimal CPU overhead
-- Best performance and reliability
+### Build & Flash
 
-### Library Implementation
-- Pure ESP-IDF implementation using GPIO interrupts and timers
-- No special hardware requirements
-- Portable to any GPIO-capable ESP32 variant
+1.  **Clone the repository**:
+    ```bash
+    git clone <repo-url>
+    cd idf-heating/project
+    ```
 
-To switch between implementations:
+2.  **Configure**:
+    ```bash
+    idf.py menuconfig
+    ```
+    - Set WiFi SSID/Password under `OpenTherm Gateway Configuration`.
+    - Set MQTT Broker URL.
 
-```bash
-idf.py menuconfig
-# Navigate to: OpenTherm Implementation → Select desired backend
-idf.py build flash
-```
+3.  **Build Everything**:
+    The included script builds both the React UI and the ESP firmware.
+    ```bash
+    ./build.sh
+    ```
 
-Both implementations provide identical API, so the rest of the application is unaffected.
+4.  **Flash**:
+    ```bash
+    idf.py flash monitor
+    ```
 
-## Troubleshooting
+## Web Interface
 
-### WiFi Issues
-- Verify SSID and password in menuconfig
-- Check 2.4GHz WiFi is enabled (ESP32 doesn't support 5GHz)
-- Monitor serial output: `idf.py monitor`
+Once running, navigate to `http://<device-ip>/`.
+- **Dashboard**: Overview of current temperatures and status.
+- **Logs**: Real-time stream of OpenTherm messages.
+- **Diagnostics**: Detailed boiler parameters and flags.
+- **Write**: Manually send OpenTherm commands (for testing).
 
-### No OpenTherm Messages
-- Verify OpenTherm interfaces are properly wired
-- Check GPIO pins match your configuration
-- Ensure both thermostat and boiler are powered
-- Test voltage levels on OpenTherm lines (should be 7-15V idle)
+## MQTT Topics
 
-### WebSocket Connection Fails
-- Verify device IP address (check serial monitor)
-- Ensure HTTP server started successfully
-- Check firewall settings on client device
-- Try different browser or clear cache
+The gateway publishes to `opentherm/#` (configurable):
 
-### MQTT Not Connecting
-- Verify MQTT broker URI is correct
-- Check username/password if broker requires authentication
-- Ensure MQTT broker is reachable from ESP32 network
-- Monitor logs for connection errors
+- `opentherm/status`: JSON (connection status, uptime)
+- `opentherm/messages`: JSON (stream of all frames)
+- `opentherm/boiler/temperature`: Boiler water temp
+- `opentherm/boiler/pressure`: System pressure
+- `opentherm/thermostat/setpoint`: Current control setpoint
+- `opentherm/room/temperature`: Room temperature
+- ...and many more.
 
-## OTA Updates
+## Architecture Details
 
-To perform over-the-air firmware updates:
-
-1. Build new firmware: `idf.py build`
-2. Host the binary on HTTP server
-3. Navigate to `http://<device-ip>/ota`
-4. Enter firmware URL and click "Update"
-5. Device will download, flash, and reboot
-
-Alternatively, trigger OTA via MQTT:
-```bash
-mosquitto_pub -h <broker> -t opentherm/ota/update -m "http://server/firmware.bin"
-```
-
-## Development
-
-### Adding Custom Data ID Handlers
-
-Edit `components/boiler_manager/boiler_manager.c` to add custom handling for specific OpenTherm Data IDs.
-
-### Extending MQTT Topics
-
-Modify `components/mqtt_bridge/mqtt_bridge.c` to publish additional telemetry to custom topics.
-
-### Custom Web Interface
-
-Replace the built-in HTML in `components/websocket_server/websocket_server.c` with your own interface.
-
-## References
-
-- OpenTherm Protocol Specification: https://www.opentherm.eu/
-- ESP-IDF Documentation: https://docs.espressif.com/projects/esp-idf/
-- Original OpenTherm Library: https://github.com/ihormelnyk/opentherm_library
+**Gorynych** runs a dedicated FreeRTOS task (`BoilerManager`) that orchestrates traffic.
+- **Proxy Mode**: Frames from Thermostat are read, parsed, and forwarded to Boiler. Responses from Boiler are forwarded back.
+- **Interception**: The gateway can modify frames on-the-fly or inject its own queries (e.g., "Give me your fault code") during idle slots.
+- **Driver**: Uses the ESP32's **RMT (Remote Control)** peripheral to generate and decode Manchester-encoded OpenTherm signals with high precision, unloading the CPU.
 
 ## License
 
-MIT License. Based on ESP-IDF and the OpenTherm library by Ihor Melnyk.
+MIT License.

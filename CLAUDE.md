@@ -11,72 +11,67 @@ idf.py flash         # Flash to device
 idf.py monitor       # Monitor serial output
 idf.py flash monitor # Build, flash, and monitor in one step
 idf.py fullclean     # Clean build artifacts
+./build.sh           # Build everything (Web UI + Firmware)
+./build.sh --clean   # Clean everything
 ```
 
 Requires ESP-IDF v5.0+ with `IDF_PATH` environment variable set.
 
 ## Project Overview
 
-ESP-IDF OpenTherm Gateway that acts as a MITM proxy between a thermostat and boiler. Intercepts all OpenTherm protocol messages, provides real-time WebSocket monitoring, MQTT integration, and OTA updates.
+**Gorynych** is an ESP-IDF project (ESP32) that acts as a MITM proxy between a thermostat and boiler. Intercepts all OpenTherm protocol messages, provides real-time WebSocket monitoring, MQTT integration, and OTA updates.
 
 ## Architecture
 
 ```
 ┌─────────────────────┐
-│ opentherm_gateway.c │  Main application (app_main, 1ms gateway loop)
+│    gorynych.cpp     │  Main application (app_main, WiFi init)
 └──────────┬──────────┘
            │
     ┌──────┴──────┬────────────┬──────────────┬────────────┐
     │             │            │              │            │
 ┌───▼─────┐  ┌────▼───────┐  ┌─▼──────────┐  ┌▼────────┐  ┌▼────────┐
-│opentherm│  │boiler_mgr  │  │websocket   │  │mqtt     │  │ota      │
-│ (API)   │  │            │  │ _server    │  │ _bridge │  │ _update │
+│ot_driver│  │boiler_mgr  │  │websocket   │  │mqtt     │  │ota      │
+│(RMT)    │  │(Logic)     │  │ _server    │  │ _bridge │  │ _update │
 └───┬─────┘  └────────────┘  └────────────┘  └─────────┘  └─────────┘
     │
-    ├─RMT impl ──► opentherm_rmt (hardware RMT peripheral)
-    └─Library impl ► opentherm_library (ISR-based software)
+    └─Hardware RMT Peripheral
 ```
 
 ### Key Components
 
-- **main/opentherm_gateway.c**: Entry point, WiFi init, main 1ms gateway loop that drives `ot_process()` and `boiler_manager_process()`
-- **components/opentherm/**: Generic API abstraction (`opentherm_api.h`) with swappable backends (RMT or software)
-- **components/opentherm_rmt/**: Hardware RMT peripheral implementation for Manchester encoding
-- **components/opentherm_library/**: Software ISR-based implementation (ported from Arduino library)
-- **components/boiler_manager/**: ID=0 interception, diagnostic injection (30+ data types), manual write queuing
-- **components/websocket_server/**: HTTP server + WebSocket, serves web UI pages, JSON APIs
-- **components/mqtt_bridge/**: MQTT client for external control, config persisted in NVS
-- **components/ota_update/**: OTA firmware updates with rollback support
-- **components/web_ui/**: Page content with compile-time HTML/CSS minification (`minify.hpp`)
-
-### OpenTherm Backend Selection
-
-Configure via `idf.py menuconfig` → "OpenTherm Implementation":
-- **RMT** (default): Uses ESP32 RMT peripheral for hardware-timed Manchester encoding
-- **Library**: Pure GPIO/timer ISR implementation, more portable
-
-Both provide identical API through adapter pattern.
+- **main/gorynych.cpp**: Entry point, WiFi init, startup logic.
+- **components/ot/**: `OpenThermDriver` class using ESP32 RMT peripheral for precise timing.
+- **components/boiler_manager/**: Core logic. `BoilerManager` class handles message routing, interception, diagnostic injection, and state tracking (`BoilerState`).
+- **components/websocket_server/**: Serves the Web UI (SPA) and provides WebSocket endpoint for real-time logging + JSON APIs.
+- **components/mqtt_bridge/**: MQTT client for publishing telemetry and receiving control commands.
+- **components/web_ui/**: C wrapper around embedded gzipped Web UI assets (`index.html.gz`, etc.).
+- **web-ui/**: React + Vite frontend source code.
 
 ## Key Configuration
 
-- **GPIO Pins**: `main/Kconfig.projbuild` (thermostat/boiler RX/TX pins)
-- **WiFi/MQTT**: `main/Kconfig.projbuild` (also editable via menuconfig)
-- **Flash Partitions**: `partitions.csv` (4MB with OTA rollback)
-- **Build Defaults**: `sdkconfig.defaults`
+- **GPIO Pins**: Defined in `main/gorynych.h`.
+  - Master (Thermostat): RX=25, TX=26
+  - Slave (Boiler): RX=13, TX=14
+- **WiFi/MQTT**: Configured via `idf.py menuconfig` (stored in NVS) or `main/Kconfig.projbuild`.
+- **Flash Partitions**: `partitions.csv` (4MB with OTA rollback).
 
 ## Development Patterns
 
-### Adding a Web UI Page
+### Web UI Development
 
-1. Add HTML/CSS content to `components/web_ui/web_ui_pages.cpp` using `MINIFY_HTML()` / `MINIFY_CSS()` macros
-2. Declare exports in `components/web_ui/web_ui.h`
-3. Add HTTP handler in `components/websocket_server/websocket_server.c`
+The Web UI is a React Single Page Application (SPA).
+1.  Source is in `web-ui/`.
+2.  Build with `./build.sh` (which calls `npm run build` in `web-ui/`).
+3.  The build artifacts (`dist/`) are gzipped and embedded into the firmware binary via linker scripts.
+4.  `websocket_server.cpp` handles SPA routing (serving `index.html` for client-side routes).
 
 ### Adding New Diagnostics
 
-1. Add data ID to diagnostic command list in `components/boiler_manager/boiler_manager.c`
-2. Add `boiler_diagnostic_value_t` field to `boiler_diagnostics_t` struct in `boiler_manager.h`
-3. Update diagnostics web page to display the new value
+1.  Add new fields to `BoilerState` struct in `components/boiler_manager/include/boiler_manager.hpp`.
+2.  Update `BoilerManager::Impl::updateState()` in `components/boiler_manager/boiler_manager.cpp` to parse/store the value.
+3.  Update `diagnostics_api_handler` in `components/websocket_server/websocket_server.cpp` to include the new field in JSON output.
+4.  Update Web UI (`web-ui/src/pages/Diagnostics.js`) to display it.
 
 ### OpenTherm Message Format
 
@@ -88,5 +83,4 @@ Common Data IDs: 0=Status, 1=TSet, 17=Modulation, 25=Tboiler, 26=Tdhw, 28=Tretur
 
 - OpenTherm Protocol: https://www.opentherm.eu/
 - ESP-IDF Docs: https://docs.espressif.com/projects/esp-idf/
-- OpenTherm Library (original): https://github.com/ihormelnyk/opentherm_library
 - To run idf.py commands, export it to the shell first using `source ~/esp/v5.5.1/esp-idf/export.sh`

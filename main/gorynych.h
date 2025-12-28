@@ -1,12 +1,12 @@
 /*
- * OpenTherm Gateway with WiFi and WebSocket Logging
+ * Gorynych - OpenTherm Gateway with WiFi and WebSocket Logging
  * 
  * This gateway sits between a thermostat and boiler, proxying all
  * OpenTherm messages while logging them via WebSocket for analysis.
  */
 
-#ifndef OPENTHERM_GATEWAY_H
-#define OPENTHERM_GATEWAY_H
+#ifndef GORYNYCH_H
+#define GORYNYCH_H
 
 #include "esp_err.h"
 
@@ -36,16 +36,16 @@ extern "C" {
 #define OT_GATEWAY_TASK_PRIORITY    5
 
 // Initialize console (if using USB Serial JTAG)
-esp_err_t opentherm_gateway_console_init(void);
+esp_err_t gorynych_console_init(void);
 
 // Get boiler manager instance (for HTTP handlers)
 // Forward declaration - actual type is defined in boiler_manager.h
 struct boiler_manager;
-struct boiler_manager* opentherm_gateway_get_boiler_manager(void);
+struct boiler_manager* gorynych_get_boiler_manager(void);
 
 #ifdef __cplusplus
 }
 #endif
 
-#endif // OPENTHERM_GATEWAY_H
+#endif // GORYNYCH_H
 
