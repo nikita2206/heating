@@ -26,7 +26,6 @@
 #include "nvs_flash.h"
 
 #include "opentherm_gateway.h"
-#include "open_therm.h"
 #include "boiler_manager.hpp"
 #include "mqtt_bridge.hpp"
 
@@ -155,42 +154,6 @@ static void opentherm_message_callback(std::string_view direction, ot::MessageSo
                                             type_str, data_id, data_value, source_str);
 }
 
-// Heartbeat task - sends periodic status updates
-static void heartbeat_task(void* arg) {
-    (void)arg;
-
-    while (true) {
-        vTaskDelay(pdMS_TO_TICKS(5000));
-
-
-        // if (s_thermostat && s_boiler) {
-        //     auto therm_stats = s_thermostat->stats();
-        //     auto boiler_stats = s_boiler->stats();
-
-        //     char status_msg[256];
-        //     snprintf(status_msg, sizeof(status_msg),
-        //              "Gateway status: OK | Uptime: %llu s | Therm RX: %lu TX: %lu | Boiler RX: %lu TX: %lu",
-        //              static_cast<unsigned long long>(esp_timer_get_time() / 1000000),
-        //              static_cast<unsigned long>(therm_stats.rxCount),
-        //              static_cast<unsigned long>(therm_stats.txCount),
-        //              static_cast<unsigned long>(boiler_stats.rxCount),
-        //              static_cast<unsigned long>(boiler_stats.txCount));
-
-        //     websocket_server_send_text(&ws_server, status_msg);
-
-        //     ESP_LOGD(TAG, "Stats: Therm(rx=%lu,tx=%lu,err=%lu,to=%lu) Boiler(rx=%lu,tx=%lu,err=%lu,to=%lu)",
-        //              static_cast<unsigned long>(therm_stats.rxCount),
-        //              static_cast<unsigned long>(therm_stats.txCount),
-        //              static_cast<unsigned long>(therm_stats.errorCount),
-        //              static_cast<unsigned long>(therm_stats.timeoutCount),
-        //              static_cast<unsigned long>(boiler_stats.rxCount),
-        //              static_cast<unsigned long>(boiler_stats.txCount),
-        //              static_cast<unsigned long>(boiler_stats.errorCount),
-        //              static_cast<unsigned long>(boiler_stats.timeoutCount));
-        // }
-    }
-}
-
 // Initialize and start the gateway
 static void start_gateway() {
     ESP_LOGI(TAG, "Starting OpenTherm gateway (C++ implementation)");
@@ -243,9 +206,6 @@ static void start_gateway() {
         return;
     }
     ESP_LOGI(TAG, "Main loop started");
-
-    // Start heartbeat task
-    //xTaskCreate(heartbeat_task, "heartbeat", 2048, nullptr, 3, nullptr);
 
     ESP_LOGI(TAG, "OpenTherm gateway running");
     ESP_LOGI(TAG, "  Thermostat side: RX=GPIO%d, TX=GPIO%d", OT_MASTER_IN_PIN, OT_MASTER_OUT_PIN);
