@@ -141,6 +141,24 @@ struct BoilerState {
     BoilerStateValue custom202;
 };
 
+// Thermostat state structure
+struct ThermostatState {
+    // ID=0 Master Status Flags
+    bool chEnable{false};
+    bool dhwEnable{false};
+    bool coolingEnable{false};
+    bool otcActive{false};
+    bool ch2Enable{false};
+    
+    // Properties
+    BoilerStateValue tSet;      // Control Setpoint (ID 1)
+    BoilerStateValue tRoom;     // Room Temperature (ID 24)
+    BoilerStateValue maxChSet;  // Max CH Setpoint (ID 57)
+    
+    // Timestamp of last valid command from thermostat
+    std::chrono::milliseconds lastUpdate{0};
+};
+
 // Status snapshot for external queries
 struct ManagerStatus {
     bool controlEnabled = false;
@@ -198,6 +216,7 @@ public:
 
     // Diagnostics access
     [[nodiscard]] const BoilerState& state() const;
+    [[nodiscard]] const ThermostatState& thermostatState() const;
 
     // Control mode
     [[nodiscard]] ManagerStatus status() const;

@@ -128,6 +128,7 @@ public:
     bool isRunning() const { return running_.load(); }
 
     const BoilerState& state() const { return boilerState_; }
+    const ThermostatState& thermostatState() const { return thermostatState_; }
 
     ManagerStatus status() const {
         ManagerStatus s;
@@ -143,9 +144,9 @@ public:
         // Control is active only if enabled and not in fallback
         s.controlActive = s.controlEnabled && !s.fallbackActive;
         
-        s.demandTsetC = demandTsetC_;
-        s.demandChEnabled = demandChEnabled_;
-        s.lastDemandTime = lastDemandTime_;
+        s.demandTsetC = thermostatState_.tSet.asFloatOr(0.0f);
+        s.demandChEnabled = thermostatState_.chEnable;
+        s.lastDemandTime = thermostatState_.lastUpdate;
         return s;
     }
 
@@ -343,13 +344,28 @@ private:
             
             uint8_t id = thermostatFrame.dataId();
             if (id == OT_FRAME_STATUS) { // Status
-                // Bit 0 of high byte is CH Enable
-                bool chEnabled = (thermostatFrame.highByte() & 0x01) != 0;
-                demandChEnabled_ = chEnabled;
-                lastDemandTime_ = std::chrono::milliseconds(esp_timer_get_time() / 1000);
+                uint8_t masterStatus = thermostatFrame.highByte();
+                // Bit 0: CH Enable
+                thermostatState_.chEnable = (masterStatus & 0x01) != 0;
+                // Bit 1: DHW Enable
+                thermostatState_.dhwEnable = (masterStatus & 0x02) != 0;
+                // Bit 2: Cooling Enable
+                thermostatState_.coolingEnable = (masterStatus & 0x04) != 0;
+                // Bit 3: OTC Active
+                thermostatState_.otcActive = (masterStatus & 0x08) != 0;
+                // Bit 4: CH2 Enable
+                thermostatState_.ch2Enable = (masterStatus & 0x10) != 0;
+                
+                thermostatState_.lastUpdate = std::chrono::milliseconds(esp_timer_get_time() / 1000);
             } else if (id == OT_FRAME_TSET) { // TSet
-                demandTsetC_ = thermostatFrame.asFloat();
-                lastDemandTime_ = std::chrono::milliseconds(esp_timer_get_time() / 1000);
+                thermostatState_.tSet.update(thermostatFrame.asFloat());
+                thermostatState_.lastUpdate = std::chrono::milliseconds(esp_timer_get_time() / 1000);
+            } else if (id == OT_FRAME_MAX_CH_SETPOINT) {
+                thermostatState_.maxChSet.update(thermostatFrame.asFloat());
+                thermostatState_.lastUpdate = std::chrono::milliseconds(esp_timer_get_time() / 1000);
+            } else if (id == OT_FRAME_TR) { // Room Temp
+                thermostatState_.tRoom.update(thermostatFrame.asFloat());
+                thermostatState_.lastUpdate = std::chrono::milliseconds(esp_timer_get_time() / 1000);
             }
         }
     }
@@ -597,16 +613,12 @@ private:
     std::unique_ptr<OpenThermDriver> boiler_;
 
     BoilerState boilerState_;
+    ThermostatState thermostatState_;
     // Callback (for logging)
     MessageCallback messageCallback_;
     // MQTT bridge for publishing diagnostics
     MqttBridge* mqttBridge_ = nullptr;
     size_t currentDiagIndex_ = 0;
-
-    // Control state
-    float demandTsetC_ = 0.0f;
-    bool demandChEnabled_ = false;
-    std::chrono::milliseconds lastDemandTime_{0};
 };
 
 // BoilerManager implementation
@@ -634,6 +646,10 @@ bool BoilerManager::isRunning() const {
 
 const BoilerState& BoilerManager::state() const {
     return impl_->state();
+}
+
+const ThermostatState& BoilerManager::thermostatState() const {
+    return impl_->thermostatState();
 }
 
 ManagerStatus BoilerManager::status() const {

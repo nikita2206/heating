@@ -21,6 +21,7 @@
 #define OT_FRAME_MODULATION                 17
 #define OT_FRAME_CH_PRESSURE                18
 #define OT_FRAME_DHW_FLOW_RATE              19
+#define OT_FRAME_TR                         24
 #define OT_FRAME_T_BOILER                   25
 #define OT_FRAME_T_DHW                      26
 #define OT_FRAME_T_OUTSIDE                  27
