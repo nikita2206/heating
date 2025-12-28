@@ -31,8 +31,8 @@ Requires ESP-IDF v5.0+ with `IDF_PATH` environment variable set.
     ┌──────┴──────┬────────────┬──────────────┬────────────┐
     │             │            │              │            │
 ┌───▼─────┐  ┌────▼───────┐  ┌─▼──────────┐  ┌▼────────┐  ┌▼────────┐
-│ot_driver│  │boiler_mgr  │  │websocket   │  │mqtt     │  │ota      │
-│(RMT)    │  │(Logic)     │  │ _server    │  │ _bridge │  │ _update │
+│ot_driver│  │boiler_mgr  │  │api_server  │  │mqtt     │  │ota      │
+│(RMT)    │  │(Logic)     │  │            │  │ _bridge │  │ _update │
 └───┬─────┘  └────────────┘  └────────────┘  └─────────┘  └─────────┘
     │
     └─Hardware RMT Peripheral
@@ -43,7 +43,7 @@ Requires ESP-IDF v5.0+ with `IDF_PATH` environment variable set.
 - **main/gorynych.cpp**: Entry point, WiFi init, startup logic.
 - **components/ot/**: `OpenThermDriver` class using ESP32 RMT peripheral for precise timing.
 - **components/boiler_manager/**: Core logic. `BoilerManager` class handles message routing, interception, diagnostic injection, and state tracking (`BoilerState`).
-- **components/websocket_server/**: Serves the Web UI (SPA) and provides WebSocket endpoint for real-time logging + JSON APIs.
+- **components/api_server/**: Serves the Web UI (SPA) and provides WebSocket endpoint for real-time logging + JSON APIs.
 - **components/mqtt_bridge/**: MQTT client for publishing telemetry and receiving control commands.
 - **components/web_ui/**: C wrapper around embedded gzipped Web UI assets (`index.html.gz`, etc.).
 - **web-ui/**: React + Vite frontend source code.
@@ -64,20 +64,20 @@ The Web UI is a React Single Page Application (SPA).
 1.  Source is in `web-ui/`.
 2.  Build with `./build.sh` (which calls `npm run build` in `web-ui/`).
 3.  The build artifacts (`dist/`) are gzipped and embedded into the firmware binary via linker scripts.
-4.  `websocket_server.cpp` handles SPA routing (serving `index.html` for client-side routes).
+4.  `api_server.cpp` handles SPA routing (serving `index.html` for client-side routes).
 
 ### Adding New Diagnostics
 
 1.  Add new fields to `BoilerState` struct in `components/boiler_manager/include/boiler_manager.hpp`.
 2.  Update `BoilerManager::Impl::updateState()` in `components/boiler_manager/boiler_manager.cpp` to parse/store the value.
-3.  Update `diagnostics_api_handler` in `components/websocket_server/websocket_server.cpp` to include the new field in JSON output.
+3.  Update `diagnostics_api_handler` in `components/api_server/api_server.cpp` to include the new field in JSON output.
 4.  Update Web UI (`web-ui/src/pages/Diagnostics.js`) to display it.
 
 ### OpenTherm Message Format
 
 32-bit frame: parity (1 bit) + message type (2 bits) + data ID (8 bits) + data value (16 bits)
 
-Common Data IDs: 0=Status, 1=TSet, 17=Modulation, 25=Tboiler, 26=Tdhw, 28=Treturn
+See OPENTHERM_FRAMES.md for a full glossary.
 
 ## External References
 

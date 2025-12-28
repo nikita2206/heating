@@ -66,37 +66,20 @@ done
 
 cd "$SCRIPT_DIR"
 
-# Check if web UI needs building
-WEB_UI_DIST="$WEB_UI_DIR/dist"
-WEB_UI_MISSING=false
-if [[ ! -f "$WEB_UI_DIST/index.html.gz" ]] || [[ ! -f "$WEB_UI_DIST/assets/index.js.gz" ]] || [[ ! -f "$WEB_UI_DIST/assets/index.css.gz" ]]; then
-    WEB_UI_MISSING=true
-    if [[ "$SKIP_WEB" == true ]]; then
-        print_error "Web UI build output not found!"
-        echo "Remove --skip-web flag or build manually:"
-        echo "  cd $WEB_UI_DIR && npm install && npm run build"
-        exit 1
-    fi
-fi
-
 # Build web UI
 if [[ "$SKIP_WEB" == false ]]; then
-    if [[ "$FORCE_WEB" == true ]] || [[ "$WEB_UI_MISSING" == true ]]; then
-        print_step "Building web UI..."
-        cd "$WEB_UI_DIR"
+    print_step "Building web UI..."
+    cd "$WEB_UI_DIR"
 
-        # Install dependencies if needed
-        if [[ ! -d "node_modules" ]]; then
-            print_step "Installing npm dependencies..."
-            npm install
-        fi
-
-        npm run build
-        cd "$SCRIPT_DIR"
-        echo ""
-    else
-        print_step "Web UI up to date (use --force-web to rebuild)"
+    # Install dependencies if needed
+    if [[ ! -d "node_modules" ]]; then
+        print_step "Installing npm dependencies..."
+        npm install
     fi
+
+    npm run build
+    cd "$SCRIPT_DIR"
+    echo ""
 fi
 
 # Source ESP-IDF environment if not already set

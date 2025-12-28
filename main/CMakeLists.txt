@@ -1,4 +1,4 @@
 idf_component_register(SRCS "gorynych.cpp"
                     PRIV_REQUIRES esp_driver_usb_serial_jtag esp_netif vfs esp_wifi 
-                                  nvs_flash esp_event ot websocket_server ota_update boiler_manager mqtt_bridge
+                                  nvs_flash esp_event ot api_server ota_update boiler_manager mqtt_bridge
                     INCLUDE_DIRS ".")

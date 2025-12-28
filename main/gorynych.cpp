@@ -29,9 +29,9 @@
 #include "boiler_manager.hpp"
 #include "mqtt_bridge.hpp"
 
-// WebSocket server (now C++)
+// API server (now C++)
 #include "opentherm_drv.h"
-#include "websocket_server.h"
+#include "api_server.h"
 
 // C header for OTA (still in C)
 extern "C" {
@@ -48,7 +48,7 @@ static EventGroupHandle_t s_wifi_event_group;
 #define WIFI_FAIL_BIT      BIT1
 
 static int s_retry_num = 0;
-static websocket_server_t ws_server;
+static api_server_t s_api_server;
 
 // C++ smart pointers for RAII components
 static std::unique_ptr<ot::BoilerManager> s_manager;
@@ -135,7 +135,7 @@ static esp_err_t wifi_init_sta() {
     }
 }
 
-// Message callback - logs all OpenTherm messages to WebSocket
+// Message callback - logs all OpenTherm messages to API server
 static void opentherm_message_callback(std::string_view direction, ot::MessageSource source,
                                        ot::OpenThermFrame message) {
     uint8_t data_id = message.dataId();
@@ -148,7 +148,7 @@ static void opentherm_message_callback(std::string_view direction, ot::MessageSo
              static_cast<int>(direction.size()), direction.data(),
              type_str, data_id, data_value, source_str);
 
-    websocket_server_send_opentherm_message(&ws_server,
+    api_server_send_opentherm_message(&s_api_server,
                                             std::string(direction).c_str(),
                                             message.raw(),
                                             type_str, data_id, data_value, source_str);
@@ -167,7 +167,7 @@ static void start_gateway() {
         ESP_LOGW(TAG, "MQTT bridge not started: %s", esp_err_to_name(mqtt_ret));
     }
 
-    // Initialize boiler manager (before WebSocket so it's available for API calls)
+    // Initialize boiler manager (before API server so it's available for API calls)
     ot::ManagerConfig mgr_cfg;
     mgr_cfg.mode = ot::ManagerMode::Proxy;
     mgr_cfg.interceptRate = 4;
@@ -186,19 +186,19 @@ static void start_gateway() {
     // Set MQTT bridge for diagnostics publishing
     s_manager->setMqttBridge(s_mqtt.get());
 
-    // Start WebSocket server (pass C++ pointers directly)
-    websocket_server_set_mqtt(s_mqtt.get());
-    if (websocket_server_start(&ws_server, s_manager.get()) != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to start WebSocket server");
+    // Start API server (pass C++ pointers directly)
+    api_server_set_mqtt(s_mqtt.get());
+    if (api_server_start(&s_api_server, s_manager.get()) != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to start API server");
         return;
     }
 
     // Register OTA handlers
-    httpd_handle_t http_server = websocket_server_get_handle(&ws_server);
+    httpd_handle_t http_server = api_server_get_handle(&s_api_server);
     if (http_server) {
         ota_update_register_handlers(http_server);
     }
-    ESP_LOGI(TAG, "WebSocket server started");
+    ESP_LOGI(TAG, "API server started");
 
     // Start boiler manager main loop
     if (s_manager->start() != ESP_OK) {

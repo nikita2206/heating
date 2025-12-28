@@ -41,7 +41,7 @@ Gorynych is a WiFi-enabled OpenTherm gateway based on ESP32 that sits between yo
 ├── components/
 │   ├── ot/                  # OpenTherm RMT driver (Hardware-timed)
 │   ├── boiler_manager/      # State machine, diagnostics, proxy logic
-│   ├── websocket_server/    # Web server, JSON API, WebSocket
+│   ├── api_server/          # Web server, JSON API, WebSocket
 │   ├── mqtt_bridge/         # MQTT client implementation
 │   └── web_ui/              # Embedded assets wrapper
 ├── web-ui/                  # React + Vite Frontend

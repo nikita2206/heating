@@ -1,8 +1,8 @@
 /*
- * WebSocket Server for OpenTherm Message Logging (C++)
+ * API Server for OpenTherm Message Logging (C++)
  */
 
-#include "websocket_server.h"
+#include "api_server.h"
 #include "boiler_manager.hpp"
 #include "mqtt_bridge.hpp"
 #include "opentherm_drv.h"
@@ -18,10 +18,10 @@ extern "C" {
 #include <cstdio>
 #include <cstdlib>
 
-static const char* TAG = "WebSocket";
+static const char* TAG = "ApiServer";
 static ot::BoilerManager* s_boiler_mgr = nullptr;
 static ot::MqttBridge* s_mqtt = nullptr;
-static websocket_server_t* s_ws_server = nullptr;
+static api_server_t* s_api_server = nullptr;
 
 // Callback for MQTT control mode changes
 static void mqtt_control_mode_handler(bool enabled) {
@@ -35,9 +35,9 @@ static void mqtt_control_mode_handler(bool enabled) {
     }
 }
 
-// ============================================================================
+// ============================================================================ 
 // SPA File Handlers (gzipped)
-// ============================================================================
+// ============================================================================ 
 
 // Serve gzipped index.html for all page routes (SPA routing)
 static esp_err_t spa_handler(httpd_req_t* req) {
@@ -88,9 +88,9 @@ static esp_err_t assets_handler(httpd_req_t* req) {
     return ESP_OK;
 }
 
-// ============================================================================
+// ============================================================================ 
 // API Handlers
-// ============================================================================
+// ============================================================================ 
 
 // MQTT state API
 static esp_err_t mqtt_state_handler(httpd_req_t* req) {
@@ -101,8 +101,7 @@ static esp_err_t mqtt_state_handler(httpd_req_t* req) {
 
     char buf[256];
     int len = snprintf(buf, sizeof(buf),
-        "{\"connected\":%s,\"last_tset_valid\":%s,\"last_tset\":%.2f,"
-        "\"last_ch_enable_valid\":%s,\"last_ch_enable\":%s,\"last_update_ms\":%lld,\"available\":%s}",
+        "{\"connected\":%s,\"last_tset_valid\":%s,\"last_tset\":%.2f,\"last_ch_enable_valid\":%s,\"last_ch_enable\":%s,\"last_update_ms\":%lld,\"available\":%s}",
         st.connected ? "true" : "false",
         st.lastTsetC.has_value() ? "true" : "false",
         st.lastTsetC.value_or(0.0f),
@@ -178,8 +177,7 @@ static esp_err_t mqtt_config_get_handler(httpd_req_t* req) {
 
     char buf[512];
     int len = snprintf(buf, sizeof(buf),
-        "{\"enable\":%s,\"broker_uri\":\"%s\",\"client_id\":\"%s\","
-        "\"username\":\"%s\",\"base_topic\":\"%s\",\"discovery_prefix\":\"%s\",\"connected\":%s}",
+        "{\"enable\":%s,\"broker_uri\":\"%s\",\"client_id\":\"%s\",\"username\":\"%s\",\"base_topic\":\"%s\",\"discovery_prefix\":\"%s\",\"connected\":%s}",
         cfg.enable ? "true" : "false",
         cfg.brokerUri.c_str(),
         cfg.clientId.c_str(),
@@ -236,8 +234,7 @@ static esp_err_t control_mode_get_handler(httpd_req_t* req) {
 
     char buf[256];
     int len = snprintf(buf, sizeof(buf),
-        "{\"enabled\":%s,\"active\":%s,\"fallback\":%s,\"mqtt_available\":%s,"
-        "\"demand_tset\":%.2f,\"demand_ch\":%s,\"last_demand_ms\":%lld}",
+        "{\"enabled\":%s,\"active\":%s,\"fallback\":%s,\"mqtt_available\":%s,\"demand_tset\":%.2f,\"demand_ch\":%s,\"last_demand_ms\":%lld}",
         st.controlEnabled ? "true" : "false",
         st.controlActive ? "true" : "false",
         st.fallbackActive ? "true" : "false",
@@ -366,8 +363,7 @@ static esp_err_t write_api_handler(httpd_req_t* req) {
         uint16_t response_data = response->dataValue();
 
         snprintf(json_response, sizeof(json_response),
-                 "{\"success\":true,\"request\":{\"data_id\":%d,\"data_value\":%d},"
-                 "\"response\":{\"frame\":%lu,\"type\":\"%s\",\"data_id\":%d,\"data_value\":%d}}",
+                 "{\"success\":true,\"request\":{\"data_id\":%d,\"data_value\":%d},\"response\":{\"frame\":%lu,\"type\":\"%s\",\"data_id\":%d,\"data_value\":%d}}",
                  data_id, data_value,
                  static_cast<unsigned long>(response->raw()),
                  ot::toString(resp_type),
@@ -505,19 +501,19 @@ static esp_err_t diagnostics_api_handler(httpd_req_t* req) {
     return ret;
 }
 
-// ============================================================================
+// ============================================================================ 
 // WebSocket Handler
-// ============================================================================
+// ============================================================================ 
 
 static esp_err_t ws_handler(httpd_req_t* req) {
     if (req->method == HTTP_GET) {
         ESP_LOGI(TAG, "WebSocket handshake");
 
-        auto* ws_server = static_cast<websocket_server_t*>(req->user_ctx);
-        if (ws_server) {
-            ws_server->client_fd = httpd_req_to_sockfd(req);
-            ws_server->client_connected = true;
-            ESP_LOGI(TAG, "WebSocket client connected, fd=%d", ws_server->client_fd);
+        auto* api_server = static_cast<api_server_t*>(req->user_ctx);
+        if (api_server) {
+            api_server->client_fd = httpd_req_to_sockfd(req);
+            api_server->client_connected = true;
+            ESP_LOGI(TAG, "WebSocket client connected, fd=%d", api_server->client_fd);
         }
 
         return ESP_OK;
@@ -541,12 +537,12 @@ static esp_err_t ws_handler(httpd_req_t* req) {
 static void boiler_manager_message_handler(std::string_view direction,
                                             ot::MessageSource source,
                                             ot::OpenThermFrame message) {
-    if (!s_ws_server) return;
+    if (!s_api_server) return;
 
     const char* source_str = ot::toString(source);
     const char* type_str = ot::toString(message.messageType());
 
-    websocket_server_send_opentherm_message(s_ws_server,
+    api_server_send_opentherm_message(s_api_server,
                                             std::string(direction).c_str(),
                                             message.raw(),
                                             type_str,
@@ -555,15 +551,15 @@ static void boiler_manager_message_handler(std::string_view direction,
                                             source_str);
 }
 
-// ============================================================================
+// ============================================================================ 
 // Public API
-// ============================================================================
+// ============================================================================ 
 
-extern "C" esp_err_t websocket_server_start(websocket_server_t* ws_server,
+extern "C" esp_err_t api_server_start(api_server_t* api_server,
                                              ot::BoilerManager* boiler_mgr) {
     s_boiler_mgr = boiler_mgr;
-    s_ws_server = ws_server;
-    memset(ws_server, 0, sizeof(websocket_server_t));
+    s_api_server = api_server;
+    memset(api_server, 0, sizeof(api_server_t));
 
     if (!s_boiler_mgr) {
         ESP_LOGW(TAG, "No boiler manager available - starting without it");
@@ -588,9 +584,9 @@ extern "C" esp_err_t websocket_server_start(websocket_server_t* ws_server,
     config.stack_size = 8192;
     config.lru_purge_enable = true;
 
-    ESP_LOGI(TAG, "Starting WebSocket server on port %d", config.server_port);
+    ESP_LOGI(TAG, "Starting API server on port %d", config.server_port);
 
-    if (httpd_start(&ws_server->server, &config) != ESP_OK) {
+    if (httpd_start(&api_server->server, &config) != ESP_OK) {
         ESP_LOGE(TAG, "Failed to start HTTP server");
         return ESP_FAIL;
     }
@@ -605,57 +601,57 @@ extern "C" esp_err_t websocket_server_start(websocket_server_t* ws_server,
         { "/ota", HTTP_GET, spa_handler, nullptr, false, false, nullptr },
     };
     for (const auto& uri : spa_routes) {
-        httpd_register_uri_handler(ws_server->server, &uri);
+        httpd_register_uri_handler(api_server->server, &uri);
     }
 
     // Register asset handler (catch-all for /assets/* to handle content-hashed filenames)
     httpd_uri_t assets_uri = { "/assets/*", HTTP_GET, assets_handler, nullptr, false, false, nullptr };
-    httpd_register_uri_handler(ws_server->server, &assets_uri);
+    httpd_register_uri_handler(api_server->server, &assets_uri);
 
     // Register API handlers
     httpd_uri_t diagnostics_api_uri = { "/api/diagnostics", HTTP_GET, diagnostics_api_handler, nullptr, false, false, nullptr };
-    httpd_register_uri_handler(ws_server->server, &diagnostics_api_uri);
+    httpd_register_uri_handler(api_server->server, &diagnostics_api_uri);
 
     httpd_uri_t mqtt_state_uri = { "/api/mqtt_state", HTTP_GET, mqtt_state_handler, nullptr, false, false, nullptr };
-    httpd_register_uri_handler(ws_server->server, &mqtt_state_uri);
+    httpd_register_uri_handler(api_server->server, &mqtt_state_uri);
 
     httpd_uri_t mqtt_cfg_get_uri = { "/api/mqtt_config", HTTP_GET, mqtt_config_get_handler, nullptr, false, false, nullptr };
     httpd_uri_t mqtt_cfg_post_uri = { "/api/mqtt_config", HTTP_POST, mqtt_config_post_handler, nullptr, false, false, nullptr };
-    httpd_register_uri_handler(ws_server->server, &mqtt_cfg_get_uri);
-    httpd_register_uri_handler(ws_server->server, &mqtt_cfg_post_uri);
+    httpd_register_uri_handler(api_server->server, &mqtt_cfg_get_uri);
+    httpd_register_uri_handler(api_server->server, &mqtt_cfg_post_uri);
 
     httpd_uri_t control_get_uri = { "/api/control_mode", HTTP_GET, control_mode_get_handler, nullptr, false, false, nullptr };
     httpd_uri_t control_post_uri = { "/api/control_mode", HTTP_POST, control_mode_post_handler, nullptr, false, false, nullptr };
-    httpd_register_uri_handler(ws_server->server, &control_get_uri);
-    httpd_register_uri_handler(ws_server->server, &control_post_uri);
+    httpd_register_uri_handler(api_server->server, &control_get_uri);
+    httpd_register_uri_handler(api_server->server, &control_post_uri);
 
     httpd_uri_t write_api_uri = { "/api/write", HTTP_POST, write_api_handler, nullptr, false, false, nullptr };
-    httpd_register_uri_handler(ws_server->server, &write_api_uri);
+    httpd_register_uri_handler(api_server->server, &write_api_uri);
 
-    httpd_uri_t ws_uri = { "/ws", HTTP_GET, ws_handler, ws_server, true, false, nullptr };
-    httpd_register_uri_handler(ws_server->server, &ws_uri);
+    httpd_uri_t ws_uri = { "/ws", HTTP_GET, ws_handler, api_server, true, false, nullptr };
+    httpd_register_uri_handler(api_server->server, &ws_uri);
 
-    ESP_LOGI(TAG, "WebSocket server started successfully");
+    ESP_LOGI(TAG, "API server started successfully");
     return ESP_OK;
 }
 
-extern "C" void websocket_server_set_mqtt(ot::MqttBridge* mqtt) {
+extern "C" void api_server_set_mqtt(ot::MqttBridge* mqtt) {
     s_mqtt = mqtt;
     if (s_mqtt) {
         s_mqtt->setControlCallback(mqtt_control_mode_handler);
     }
 }
 
-extern "C" void websocket_server_stop(websocket_server_t* ws_server) {
-    if (ws_server->server) {
-        httpd_stop(ws_server->server);
-        ws_server->server = nullptr;
-        ws_server->client_connected = false;
+extern "C" void api_server_stop(api_server_t* api_server) {
+    if (api_server->server) {
+        httpd_stop(api_server->server);
+        api_server->server = nullptr;
+        api_server->client_connected = false;
     }
 }
 
-extern "C" esp_err_t websocket_server_send_text(websocket_server_t* ws_server, const char* text) {
-    if (!ws_server->server || !ws_server->client_connected) {
+extern "C" esp_err_t api_server_send_text(api_server_t* api_server, const char* text) {
+    if (!api_server->server || !api_server->client_connected) {
         ESP_LOGD(TAG, "Not sending WebSocket message: server not started or client not connected");
         return ESP_FAIL;
     }
@@ -665,10 +661,10 @@ extern "C" esp_err_t websocket_server_send_text(websocket_server_t* ws_server, c
     ws_pkt.len = strlen(text);
     ws_pkt.type = HTTPD_WS_TYPE_TEXT;
 
-    esp_err_t ret = httpd_ws_send_frame_async(ws_server->server, ws_server->client_fd, &ws_pkt);
+    esp_err_t ret = httpd_ws_send_frame_async(api_server->server, api_server->client_fd, &ws_pkt);
     if (ret != ESP_OK) {
         ESP_LOGW(TAG, "Failed to send WebSocket message: %s", esp_err_to_name(ret));
-        ws_server->client_connected = false;
+        api_server->client_connected = false;
     } else {
         ESP_LOGD(TAG, "WebSocket message sent");
     }
@@ -676,7 +672,7 @@ extern "C" esp_err_t websocket_server_send_text(websocket_server_t* ws_server, c
     return ret;
 }
 
-extern "C" esp_err_t websocket_server_send_opentherm_message(websocket_server_t* ws_server,
+extern "C" esp_err_t api_server_send_opentherm_message(api_server_t* api_server,
                                                               const char* direction,
                                                               uint32_t message,
                                                               const char* msg_type,
@@ -691,9 +687,9 @@ extern "C" esp_err_t websocket_server_send_opentherm_message(websocket_server_t*
              static_cast<long long>(timestamp), direction, source ? source : "THERMOSTAT_BOILER",
              static_cast<unsigned long>(message), msg_type, data_id, data_value);
 
-    return websocket_server_send_text(ws_server, json_buffer);
+    return api_server_send_text(api_server, json_buffer);
 }
 
-extern "C" httpd_handle_t websocket_server_get_handle(websocket_server_t* ws_server) {
-    return ws_server ? ws_server->server : nullptr;
+extern "C" httpd_handle_t api_server_get_handle(api_server_t* api_server) {
+    return api_server ? api_server->server : nullptr;
 }

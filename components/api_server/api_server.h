@@ -1,9 +1,9 @@
 /*
- * WebSocket Server for OpenTherm Message Logging (C++)
+ * API Server for OpenTherm Message Logging (C++)
  */
 
-#ifndef WEBSOCKET_SERVER_H
-#define WEBSOCKET_SERVER_H
+#ifndef API_SERVER_H
+#define API_SERVER_H
 
 #include "esp_err.h"
 #include "esp_http_server.h"
@@ -20,29 +20,29 @@ namespace ot {
 extern "C" {
 #endif
 
-// WebSocket server handle
+// API server handle
 typedef struct {
     httpd_handle_t server;
     int client_fd;
     bool client_connected;
-} websocket_server_t;
+} api_server_t;
 
 #ifdef __cplusplus
-// Initialize and start WebSocket server (C++ version)
-esp_err_t websocket_server_start(websocket_server_t *ws_server, ot::BoilerManager *boiler_mgr);
+// Initialize and start API server (C++ version)
+esp_err_t api_server_start(api_server_t *api_server, ot::BoilerManager *boiler_mgr);
 
 // Set MQTT bridge instance
-void websocket_server_set_mqtt(ot::MqttBridge *mqtt);
+void api_server_set_mqtt(ot::MqttBridge *mqtt);
 #endif
 
-// Stop WebSocket server
-void websocket_server_stop(websocket_server_t *ws_server);
+// Stop API server
+void api_server_stop(api_server_t *api_server);
 
 // Send text message to all connected clients
-esp_err_t websocket_server_send_text(websocket_server_t *ws_server, const char *text);
+esp_err_t api_server_send_text(api_server_t *api_server, const char *text);
 
 // Send JSON formatted OpenTherm message
-esp_err_t websocket_server_send_opentherm_message(websocket_server_t *ws_server,
+esp_err_t api_server_send_opentherm_message(api_server_t *api_server,
                                                    const char *direction,
                                                    uint32_t message,
                                                    const char *msg_type,
@@ -51,10 +51,10 @@ esp_err_t websocket_server_send_opentherm_message(websocket_server_t *ws_server,
                                                    const char *source);
 
 // Get HTTP server handle (for registering additional handlers like OTA)
-httpd_handle_t websocket_server_get_handle(websocket_server_t *ws_server);
+httpd_handle_t api_server_get_handle(api_server_t *api_server);
 
 #ifdef __cplusplus
 }
 #endif
 
-#endif // WEBSOCKET_SERVER_H
+#endif // API_SERVER_H

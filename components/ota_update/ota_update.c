@@ -294,7 +294,7 @@ esp_err_t ota_update_register_handlers(httpd_handle_t server)
 {
     ESP_LOGI(TAG, "Registering OTA HTTP handlers");
 
-    // Note: GET /ota page is handled by websocket_server.cpp (SPA routing)
+    // Note: GET /ota page is handled by api_server.cpp (SPA routing)
 
     // POST /ota - Upload firmware
     httpd_uri_t ota_upload = {
