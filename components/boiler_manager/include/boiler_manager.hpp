@@ -34,27 +34,6 @@ enum class MessageSource {
     ThermostatGateway   // Thermostat <-> Gateway (control mode)
 };
 
-// Diagnostic value with timestamp
-struct DiagnosticValue {
-    std::optional<float> value;
-    std::chrono::milliseconds timestamp{0};
-
-    [[nodiscard]] bool isValid() const { return value.has_value(); }
-
-    void update(float v) {
-        value = v;
-        timestamp = std::chrono::milliseconds(esp_timer_get_time() / 1000);
-    }
-
-    void invalidate() {
-        value.reset();
-    }
-
-    [[nodiscard]] float valueOr(float defaultVal) const {
-        return value.value_or(defaultVal);
-    }
-};
-
 // Polymorphic value for boiler state
 struct BoilerStateValue {
     enum class Type { None, Float, UInt16 };
@@ -78,10 +57,6 @@ struct BoilerStateValue {
         type = Type::UInt16;
         uVal = v;
         updateTimestamp();
-    }
-
-    void invalidate() {
-        type = Type::None;
     }
 
     [[nodiscard]] float asFloatOr(float defaultVal) const {
@@ -166,56 +141,6 @@ struct BoilerState {
     BoilerStateValue custom202;
 };
 
-// Complete diagnostic state
-struct Diagnostics {
-    DiagnosticValue tBoiler;
-    DiagnosticValue maxChWaterTemp;
-    DiagnosticValue tReturn;
-    DiagnosticValue tDhw;
-    DiagnosticValue tDhw2;
-    DiagnosticValue tOutside;
-    DiagnosticValue tExhaust;
-    DiagnosticValue tHeatExchanger;
-    DiagnosticValue tFlowCh2;
-    DiagnosticValue tStorage;
-    DiagnosticValue tCollector;
-    DiagnosticValue tSetpoint;
-    DiagnosticValue modulationLevel;
-    DiagnosticValue pressure;
-    DiagnosticValue flowRate;
-    DiagnosticValue faultCode;
-    DiagnosticValue diagCode;
-    DiagnosticValue burnerStarts;
-    DiagnosticValue dhwBurnerStarts;
-    DiagnosticValue chPumpStarts;
-    DiagnosticValue dhwPumpStarts;
-    DiagnosticValue burnerHours;
-    DiagnosticValue dhwBurnerHours;
-    DiagnosticValue chPumpHours;
-    DiagnosticValue dhwPumpHours;
-    DiagnosticValue maxCapacity;
-    DiagnosticValue minModLevel;
-    DiagnosticValue fanSetpoint;
-    DiagnosticValue fanCurrent;
-    DiagnosticValue fanExhaustRpm;
-    DiagnosticValue fanSupplyRpm;
-    DiagnosticValue co2Exhaust;
-    DiagnosticValue flameOn;
-    DiagnosticValue chMode;
-    DiagnosticValue dhwMode;
-    DiagnosticValue slaveMemberId;
-    DiagnosticValue slaveConfigFlags;
-    DiagnosticValue slaveVersion;
-    DiagnosticValue slaveType;
-    DiagnosticValue slaveOTVersion;
-    DiagnosticValue dhwSetUB;
-    DiagnosticValue dhwSetLB;
-    DiagnosticValue maxTSetUB;
-    DiagnosticValue maxTSetLB;
-    DiagnosticValue custom200;
-    DiagnosticValue custom202;
-};
-
 // Status snapshot for external queries
 struct ManagerStatus {
     bool controlEnabled = false;
@@ -272,7 +197,6 @@ public:
     [[nodiscard]] bool isRunning() const;
 
     // Diagnostics access
-    [[nodiscard]] const Diagnostics& diagnostics() const;
     [[nodiscard]] const BoilerState& state() const;
 
     // Control mode
