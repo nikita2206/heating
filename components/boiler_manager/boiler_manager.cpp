@@ -259,12 +259,28 @@ private:
 
             int64_t t1 = esp_timer_get_time();
 
-            ESP_LOGD(TAG, "Boiler response: 0x%08lX (took %lld ms)", boilerResponse, (t1 - t0) / 1000);
+            ESP_LOGD(TAG, "Boiler response: 0x%08lX (took %lld ms)", boilerResponse.value().raw(), (t1 - t0) / 1000);
 
-            logMessage("RESPONSE", MessageSource::ThermostatBoiler, boilerResponse.value());
             parseDiagnosticResponse(boilerResponse.value().dataId(), boilerResponse.value());
 
-            if (thermostat_->send(boilerResponse.value())) {
+            OpenThermFrame responseToSend = boilerResponse.value();
+
+            // If we capped the TSet, we want to spoof the response to the thermostat
+            // so it thinks the boiler accepted the requested high temperature.
+            if (config_.mode == ManagerMode::Proxy &&
+                thermostatRequest.value().dataId() == OT_FRAME_TSET &&
+                boilerResponse.value().messageType() == OpenThermMessageType::WriteAck) {
+                
+                responseToSend = OpenThermFrame::buildResponse(
+                    OpenThermMessageType::WriteAck,
+                    OT_FRAME_TSET,
+                    thermostatRequest.value().dataValue()
+                );
+            }
+
+            logMessage("RESPONSE", MessageSource::ThermostatBoiler, responseToSend);
+
+            if (thermostat_->send(responseToSend)) {
                 ESP_LOGI(TAG, "Response queued to be sent to thermostat");
                 validFrames++;
             } else {
