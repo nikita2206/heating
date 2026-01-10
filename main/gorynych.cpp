@@ -144,10 +144,6 @@ static void opentherm_message_callback(std::string_view direction, ot::MessageSo
     const char* type_str = ot::toString(message.messageType());
     const char* source_str = ot::toString(source);
 
-    ESP_LOGI(TAG, "%.*s | Type: %s | ID: %d | Value: 0x%04X | Source: %s",
-             static_cast<int>(direction.size()), direction.data(),
-             type_str, data_id, data_value, source_str);
-
     api_server_send_opentherm_message(&s_api_server,
                                             std::string(direction).c_str(),
                                             message.raw(),
@@ -183,7 +179,7 @@ static void start_gateway() {
     }
     mgr_cfg.maxSetpoint = max_setpoint;
 
-    mgr_cfg.interceptRate = 4;
+    mgr_cfg.interceptRate = 999999;
     mgr_cfg.taskStackSize = 4096;
     mgr_cfg.taskPriority = 5;
     mgr_cfg.thermostatInPin = OT_MASTER_IN_PIN;

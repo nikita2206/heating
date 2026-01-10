@@ -210,6 +210,12 @@ void OpenThermDriver::taskLoop() {
             
             // Decode
             uint32_t frame = decodeRmtAsOpenTherm(buf, size, config_.isSlave);
+
+            // Log every RMT frame for debugging
+            char logBuf[1024];
+            rmtSymbolsToString(buf, size, logBuf, sizeof(logBuf));
+            ESP_LOGI(TAG, "%s RMT[%zu] -> 0x%08lx: %s", config_.isSlave ? "T" : "B", size, (unsigned long)frame, logBuf);
+
             bool isValid = (frame != 0); // Minimal validation provided by decode
             
             if (isValid && rxQueue_) {

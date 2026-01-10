@@ -180,7 +180,7 @@ using MessageCallback = std::function<void(std::string_view direction,
  */
 struct ManagerConfig {
     ManagerMode mode = ManagerMode::Proxy;
-    uint32_t interceptRate = 10;  // Intercept every Nth frame that matches interceptable IDs
+    uint32_t interceptRate = 999999;  // Intercept every Nth frame that matches interceptable IDs
     uint32_t taskStackSize = 4096;
     UBaseType_t taskPriority = 5;
 
