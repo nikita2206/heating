@@ -77,12 +77,17 @@ public:
     }
 
     esp_err_t start() {
-        // Create OpenTherm instances with configured pins
+        // Initialize OpenTherm instances
+        // Note: minTxIntervalMs is set to 25ms for the thermostat (Slave) driver.
+        // OpenTherm requires Slaves to respond between 20ms and 115ms.
+        // The default 100ms would force a response at T+100ms, which is too close
+        // to the 115ms limit when accounting for the round-trip delay to the real boiler.
         thermostat_ = std::make_unique<OpenThermDriver>(
             OpenThermDriver::Config{
                 .inPin = config_.thermostatInPin,
                 .outPin = config_.thermostatOutPin,
-                .isSlave = true
+                .isSlave = true,
+                .minTxIntervalMs = 25
             });
         boiler_ = std::make_unique<OpenThermDriver>(
             OpenThermDriver::Config{
@@ -204,10 +209,11 @@ private:
         uint32_t invalidFrames = 0;
 
         while (running_.load()) {
-            auto thermostatRequest = thermostat_->receive(500);
+            // Wait up to 2000ms for a request (standard OT interval is ~1s)
+            auto thermostatRequest = thermostat_->receive(2000);
 
             if (!thermostatRequest.has_value()) {
-                ESP_LOGI(TAG, "No request from thermostat in 500ms time");
+                ESP_LOGI(TAG, "No request from thermostat in 2000ms time");
                 continue;
             }
 
@@ -281,7 +287,6 @@ private:
             logMessage("RESPONSE", MessageSource::ThermostatBoiler, responseToSend);
 
             if (thermostat_->send(responseToSend)) {
-                ESP_LOGI(TAG, "Response queued to be sent to thermostat");
                 validFrames++;
             } else {
                 ESP_LOGW(TAG, "Couldn't send response to thermostat, likely the TX queue is full");
