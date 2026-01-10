@@ -211,10 +211,16 @@ void OpenThermDriver::taskLoop() {
             // Decode
             uint32_t frame = decodeRmtAsOpenTherm(buf, size, config_.isSlave);
 
-            // Log every RMT frame for debugging
-            char logBuf[1024];
-            rmtSymbolsToString(buf, size, logBuf, sizeof(logBuf));
-            ESP_LOGI(TAG, "%s RMT[%zu] -> 0x%08lx: %s", config_.isSlave ? "T" : "B", size, (unsigned long)frame, logBuf);
+#if LOG_LOCAL_LEVEL >= ESP_LOG_DEBUG
+            if (esp_log_level_get(TAG) >= ESP_LOG_DEBUG) {
+                char* logBuf = (char*)malloc(1024);
+                if (logBuf) {
+                    rmtSymbolsToString(buf, size, logBuf, 1024);
+                    ESP_LOGD(TAG, "%s RMT[%zu] -> 0x%08lx: %s", config_.isSlave ? "T" : "B", size, (unsigned long)frame, logBuf);
+                    free(logBuf);
+                }
+            }
+#endif
 
             bool isValid = (frame != 0); // Minimal validation provided by decode
             
