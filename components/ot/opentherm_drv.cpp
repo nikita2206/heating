@@ -85,7 +85,9 @@ void OpenThermDriver::initRMT() {
     ESP_ERROR_CHECK(rmt_enable(txChannel_));
     
     // Set idle level (important for OpenTherm)
-    gpio_set_level(config_.outPin, 1);
+    if (!config_.isSlave) {
+        gpio_set_level(config_.outPin, 1);
+    }
 
     // RX Config
     rmt_rx_channel_config_t rx_config = {
@@ -141,9 +143,6 @@ bool OpenThermDriver::onRmtRxDone(rmt_channel_handle_t rx_chan, const rmt_rx_don
     }
     
     // Don't restart receive here; task will do it after processing to ensure buffer swap is clean
-    // Actually, RMT might need immediate restart if we want to catch back-to-back?
-    // OpenTherm is half-duplex Request-Response, so we shouldn't receive while processing unless it's noise.
-    // Safe to let task restart it.
     
     return high_task_wakeup == pdTRUE;
 }
@@ -156,7 +155,8 @@ void OpenThermDriver::taskEntry(void* arg) {
 
 void OpenThermDriver::taskLoop() {
     // Initial 1 second delay with pin at HIGH (gpio_set_level in initRMT)
-    nextPossibleTrafficTime_ = esp_timer_get_time() + 1000000;
+    // Only relevant if we are talking to a boiler.
+    nextPossibleTrafficTime_ = config_.isSlave ? esp_timer_get_time() : esp_timer_get_time() + 1000000;
     
     while (true) {
         uint32_t notificationValue = 0;
@@ -232,9 +232,9 @@ void OpenThermDriver::taskLoop() {
                 // Actually pop the item
                 xQueueReceive(txQueue_, &pendingTxFrame, 0);
                 
+                int64_t nextTime = now + minIntervalUs;
                 transmitFrame(pendingTxFrame);
                 
-                int64_t nextTime = esp_timer_get_time() + minIntervalUs;
                 if (nextTime > nextPossibleTrafficTime_) {
                     nextPossibleTrafficTime_ = nextTime;
                 }
