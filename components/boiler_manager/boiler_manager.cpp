@@ -154,6 +154,14 @@ public:
         config_.mode = mode;
     }
 
+    void setMaxSetpoint(float maxTemp) {
+        config_.maxSetpoint = maxTemp;
+    }
+
+    float getMaxSetpoint() const {
+        return config_.maxSetpoint;
+    }
+
     esp_err_t writeData(uint8_t dataId, uint16_t dataValue,
                         std::optional<OpenThermFrame>& response,
                         std::chrono::milliseconds timeout) {
@@ -220,9 +228,24 @@ private:
 
             int64_t t0 = esp_timer_get_time();
 
-            if (!boiler_->send(thermostatRequest.value())) {
+            OpenThermFrame frameToSend = thermostatRequest.value();
+
+            // Enforce max setpoint in Proxy mode
+            if (config_.mode == ManagerMode::Proxy && frameToSend.dataId() == OT_FRAME_TSET) {
+                float tset = frameToSend.asFloat();
+                if (tset > config_.maxSetpoint) {
+                    ESP_LOGI(TAG, "Capping TSet %.2f to %.2f", tset, config_.maxSetpoint);
+                    frameToSend = OpenThermFrame::buildRequest(
+                        frameToSend.messageType(),
+                        frameToSend.dataId(),
+                        OpenThermFrame::fromFloat(config_.maxSetpoint)
+                    );
+                }
+            }
+
+            if (!boiler_->send(frameToSend)) {
                 invalidFrames++;
-                ESP_LOGW(TAG, "Couldn't send frame 0x%08lX to boiler, likely the TX queue is full", thermostatRequest.value().raw());
+                ESP_LOGW(TAG, "Couldn't send frame 0x%08lX to boiler, likely the TX queue is full", frameToSend.raw());
                 continue;
             }
 
@@ -658,6 +681,14 @@ ManagerStatus BoilerManager::status() const {
 
 void BoilerManager::setMode(ManagerMode mode) {
     impl_->setMode(mode);
+}
+
+void BoilerManager::setMaxSetpoint(float maxTemp) {
+    impl_->setMaxSetpoint(maxTemp);
+}
+
+float BoilerManager::getMaxSetpoint() const {
+    return impl_->getMaxSetpoint();
 }
 
 esp_err_t BoilerManager::writeData(uint8_t dataId, uint16_t dataValue,

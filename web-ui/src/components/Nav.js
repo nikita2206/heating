@@ -6,6 +6,7 @@ const NAV_ITEMS = [
   { path: '/', label: 'Dashboard' },
   { path: '/logs', label: 'Logs' },
   { path: '/diagnostics', label: 'Diagnostics' },
+  { path: '/settings', label: 'Settings' },
   { path: '/mqtt', label: 'MQTT' },
   { path: '/write', label: 'Manual Write' },
   { path: '/ota', label: 'OTA Update' }

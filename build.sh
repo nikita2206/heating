@@ -89,6 +89,8 @@ if [[ -z "$IDF_PATH" ]]; then
         source "$HOME/esp/v5.5.1/esp-idf/export.sh"
     elif [[ -f "$HOME/esp/esp-idf/export.sh" ]]; then
         source "$HOME/esp/esp-idf/export.sh"
+    elif [[ -f "/opt/esp-idf/export.sh" ]]; then
+        source "/opt/esp-idf/export.sh"
     else
         print_error "ESP-IDF not found. Please set IDF_PATH or install ESP-IDF."
         exit 1

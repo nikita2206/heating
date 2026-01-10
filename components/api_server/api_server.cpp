@@ -14,6 +14,7 @@ extern "C" {
 #include "esp_log.h"
 #include "esp_http_server.h"
 #include "esp_timer.h"
+#include "nvs_flash.h"
 #include <cstring>
 #include <cstdio>
 #include <cstdlib>
@@ -272,11 +273,68 @@ static esp_err_t control_mode_post_handler(httpd_req_t* req) {
     return ESP_OK;
 }
 
+// Settings API
+static esp_err_t settings_get_handler(httpd_req_t* req) {
+    char buf[128];
+    float max_setpoint = 100.0f;
+    if (s_boiler_mgr) {
+        max_setpoint = s_boiler_mgr->getMaxSetpoint();
+    }
+    int len = snprintf(buf, sizeof(buf), "{\"max_setpoint\":%.2f}", max_setpoint);
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_send(req, buf, len);
+    return ESP_OK;
+}
+
+static esp_err_t settings_post_handler(httpd_req_t* req) {
+    char body[256];
+    read_req_body(req, body, sizeof(body));
+    
+    // Parse JSON
+    // Simple manual parsing since we only expect one field for now
+    char* val_start = strstr(body, "\"max_setpoint\"");
+    if (!val_start) {
+        httpd_resp_set_status(req, "400 Bad Request");
+        httpd_resp_sendstr(req, "{\"error\":\"Missing max_setpoint\"}");
+        return ESP_FAIL;
+    }
+    
+    val_start = strchr(val_start, ':');
+    if (!val_start) return ESP_FAIL;
+    val_start++;
+    
+    float val = static_cast<float>(atof(val_start));
+    
+    if (val < 0.0f || val > 100.0f) {
+        httpd_resp_set_status(req, "400 Bad Request");
+        httpd_resp_sendstr(req, "{\"error\":\"Value out of range\"}");
+        return ESP_FAIL;
+    }
+
+    if (s_boiler_mgr) {
+        s_boiler_mgr->setMaxSetpoint(val);
+    }
+    
+    // Save to NVS
+    nvs_handle_t nvs;
+    if (nvs_open("config", NVS_READWRITE, &nvs) == ESP_OK) {
+        uint32_t raw_val;
+        memcpy(&raw_val, &val, sizeof(float));
+        nvs_set_u32(nvs, "max_setpoint", raw_val);
+        nvs_commit(nvs);
+        nvs_close(nvs);
+    }
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, "{\"status\":\"ok\"}");
+    return ESP_OK;
+}
+
 // API handler for manual WRITE_DATA frame injection
 static esp_err_t write_api_handler(httpd_req_t* req) {
     if (!s_boiler_mgr) {
         httpd_resp_set_status(req, "500 Internal Server Error");
-        httpd_resp_send(req, "{\"error\":\"Boiler manager not available\"}", -1);
+        httpd_resp_sendstr(req, "{\"error\":\"Boiler manager not available\"}");
         return ESP_FAIL;
     }
 
@@ -285,11 +343,13 @@ static esp_err_t write_api_handler(httpd_req_t* req) {
     int ret = httpd_req_recv(req, content, sizeof(content) - 1);
     if (ret <= 0) {
         httpd_resp_set_status(req, "400 Bad Request");
-        httpd_resp_send(req, "{\"error\":\"Failed to read request body\"}", -1);
+        httpd_resp_sendstr(req, "{\"error\":\"Failed to read request body\"}");
         return ESP_FAIL;
     }
     content[ret] = '\0';
-
+    
+    // ... rest of write_api_handler
+    
     // Parse JSON manually
     uint8_t data_id = 0;
     uint16_t data_value = 0;
@@ -348,7 +408,7 @@ static esp_err_t write_api_handler(httpd_req_t* req) {
 
     if (!has_data_id || !has_data_value) {
         httpd_resp_set_status(req, "400 Bad Request");
-        httpd_resp_send(req, "{\"error\":\"Missing data_id or data_value\"}", -1);
+        httpd_resp_sendstr(req, "{\"error\":\"Missing data_id or data_value\"}");
         return ESP_FAIL;
     }
 
@@ -407,7 +467,7 @@ static int format_boiler_bool(char* buf, size_t buf_size, const char* name, bool
 static esp_err_t diagnostics_api_handler(httpd_req_t* req) {
     if (!s_boiler_mgr) {
         httpd_resp_set_status(req, "500 Internal Server Error");
-        httpd_resp_send(req, "{\"error\":\"Boiler manager not available\"}", -1);
+        httpd_resp_sendstr(req, "{\"error\":\"Boiler manager not available\"}");
         return ESP_FAIL;
     }
 
@@ -419,13 +479,12 @@ static esp_err_t diagnostics_api_handler(httpd_req_t* req) {
     char* json_buffer = static_cast<char*>(malloc(json_buffer_size));
     if (!json_buffer) {
         httpd_resp_set_status(req, "500 Internal Server Error");
-        httpd_resp_send(req, "{\"error\":\"Memory allocation failed\"}", -1);
+        httpd_resp_sendstr(req, "{\"error\":\"Memory allocation failed\"}");
         return ESP_FAIL;
     }
 
     char* p = json_buffer;
     size_t remaining = json_buffer_size;
-    int written;
 
     *p++ = '{';
     remaining--;
@@ -596,6 +655,7 @@ extern "C" esp_err_t api_server_start(api_server_t* api_server,
         { "/", HTTP_GET, spa_handler, nullptr, false, false, nullptr },
         { "/logs", HTTP_GET, spa_handler, nullptr, false, false, nullptr },
         { "/diagnostics", HTTP_GET, spa_handler, nullptr, false, false, nullptr },
+        { "/settings", HTTP_GET, spa_handler, nullptr, false, false, nullptr },
         { "/mqtt", HTTP_GET, spa_handler, nullptr, false, false, nullptr },
         { "/write", HTTP_GET, spa_handler, nullptr, false, false, nullptr },
         { "/ota", HTTP_GET, spa_handler, nullptr, false, false, nullptr },
@@ -624,6 +684,11 @@ extern "C" esp_err_t api_server_start(api_server_t* api_server,
     httpd_uri_t control_post_uri = { "/api/control_mode", HTTP_POST, control_mode_post_handler, nullptr, false, false, nullptr };
     httpd_register_uri_handler(api_server->server, &control_get_uri);
     httpd_register_uri_handler(api_server->server, &control_post_uri);
+
+    httpd_uri_t settings_get_uri = { "/api/settings", HTTP_GET, settings_get_handler, nullptr, false, false, nullptr };
+    httpd_uri_t settings_post_uri = { "/api/settings", HTTP_POST, settings_post_handler, nullptr, false, false, nullptr };
+    httpd_register_uri_handler(api_server->server, &settings_get_uri);
+    httpd_register_uri_handler(api_server->server, &settings_post_uri);
 
     httpd_uri_t write_api_uri = { "/api/write", HTTP_POST, write_api_handler, nullptr, false, false, nullptr };
     httpd_register_uri_handler(api_server->server, &write_api_uri);

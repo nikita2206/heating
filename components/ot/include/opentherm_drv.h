@@ -131,6 +131,10 @@ public:
         return (u88 & 0x8000) ? -(0x10000L - u88) / 256.0f : u88 / 256.0f;
     }
 
+    static uint16_t fromFloat(float f) {
+        return static_cast<uint16_t>(static_cast<int16_t>(f * 256.0f));
+    }
+
     constexpr explicit operator bool() const { return raw_ != 0; }
 
 private:

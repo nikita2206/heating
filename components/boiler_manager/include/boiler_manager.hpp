@@ -189,6 +189,9 @@ struct ManagerConfig {
     gpio_num_t thermostatOutPin = GPIO_NUM_17;
     gpio_num_t boilerInPin = GPIO_NUM_18;
     gpio_num_t boilerOutPin = GPIO_NUM_19;
+
+    // Maximum allowed setpoint (default 100.0 - effectively disabled)
+    float maxSetpoint = 100.0f;
 };
 
 /**
@@ -221,6 +224,8 @@ public:
     // Control mode
     [[nodiscard]] ManagerStatus status() const;
     void setMode(ManagerMode mode);
+    void setMaxSetpoint(float maxTemp);
+    [[nodiscard]] float getMaxSetpoint() const;
 
     // Manual write to boiler (thread-safe, blocks up to timeout)
     [[nodiscard]] esp_err_t writeData(uint8_t dataId, uint16_t dataValue,

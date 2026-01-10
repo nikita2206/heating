@@ -170,6 +170,19 @@ static void start_gateway() {
     // Initialize boiler manager (before API server so it's available for API calls)
     ot::ManagerConfig mgr_cfg;
     mgr_cfg.mode = ot::ManagerMode::Proxy;
+    
+    // Load max setpoint from NVS
+    nvs_handle_t nvs;
+    float max_setpoint = 100.0f;
+    if (nvs_open("config", NVS_READONLY, &nvs) == ESP_OK) {
+        uint32_t raw_val; // Store float as uint32_t because nvs doesn't support float directly
+        if (nvs_get_u32(nvs, "max_setpoint", &raw_val) == ESP_OK) {
+            memcpy(&max_setpoint, &raw_val, sizeof(float));
+        }
+        nvs_close(nvs);
+    }
+    mgr_cfg.maxSetpoint = max_setpoint;
+
     mgr_cfg.interceptRate = 4;
     mgr_cfg.taskStackSize = 4096;
     mgr_cfg.taskPriority = 5;

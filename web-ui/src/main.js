@@ -10,11 +10,13 @@ import { renderDiagnostics, initDiagnostics, destroyDiagnostics } from './pages/
 import { renderMqtt, initMqtt, destroyMqtt } from './pages/Mqtt.js';
 import { renderWrite, initWrite, destroyWrite } from './pages/Write.js';
 import { renderOta, initOta, destroyOta } from './pages/Ota.js';
+import { renderSettings, initSettings, destroySettings } from './pages/Settings.js';
 
 const routes = {
   '/': { render: renderDashboard, init: initDashboard, destroy: destroyDashboard },
   '/logs': { render: renderLogs, init: initLogs, destroy: destroyLogs },
   '/diagnostics': { render: renderDiagnostics, init: initDiagnostics, destroy: destroyDiagnostics },
+  '/settings': { render: renderSettings, init: initSettings, destroy: destroySettings },
   '/mqtt': { render: renderMqtt, init: initMqtt, destroy: destroyMqtt },
   '/write': { render: renderWrite, init: initWrite, destroy: destroyWrite },
   '/ota': { render: renderOta, init: initOta, destroy: destroyOta }
