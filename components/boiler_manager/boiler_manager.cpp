@@ -154,6 +154,14 @@ public:
         config_.mode = mode;
     }
 
+    void setMaxSetpoint(float maxTemp) {
+        config_.maxSetpoint = maxTemp;
+    }
+
+    float getMaxSetpoint() const {
+        return config_.maxSetpoint;
+    }
+
     esp_err_t writeData(uint8_t dataId, uint16_t dataValue,
                         std::optional<OpenThermFrame>& response,
                         std::chrono::milliseconds timeout) {
@@ -220,9 +228,24 @@ private:
 
             int64_t t0 = esp_timer_get_time();
 
-            if (!boiler_->send(thermostatRequest.value())) {
+            OpenThermFrame frameToSend = thermostatRequest.value();
+
+            // Enforce max setpoint in Proxy mode
+            if (config_.mode == ManagerMode::Proxy && frameToSend.dataId() == OT_FRAME_TSET) {
+                float tset = frameToSend.asFloat();
+                if (tset > config_.maxSetpoint) {
+                    ESP_LOGI(TAG, "Capping TSet %.2f to %.2f", tset, config_.maxSetpoint);
+                    frameToSend = OpenThermFrame::buildRequest(
+                        frameToSend.messageType(),
+                        frameToSend.dataId(),
+                        OpenThermFrame::fromFloat(config_.maxSetpoint)
+                    );
+                }
+            }
+
+            if (!boiler_->send(frameToSend)) {
                 invalidFrames++;
-                ESP_LOGW(TAG, "Couldn't send frame 0x%08lX to boiler, likely the TX queue is full", thermostatRequest.value().raw());
+                ESP_LOGW(TAG, "Couldn't send frame 0x%08lX to boiler, likely the TX queue is full", frameToSend.raw());
                 continue;
             }
 
@@ -236,12 +259,28 @@ private:
 
             int64_t t1 = esp_timer_get_time();
 
-            ESP_LOGD(TAG, "Boiler response: 0x%08lX (took %lld ms)", boilerResponse, (t1 - t0) / 1000);
+            ESP_LOGD(TAG, "Boiler response: 0x%08lX (took %lld ms)", boilerResponse.value().raw(), (t1 - t0) / 1000);
 
-            logMessage("RESPONSE", MessageSource::ThermostatBoiler, boilerResponse.value());
             parseDiagnosticResponse(boilerResponse.value().dataId(), boilerResponse.value());
 
-            if (thermostat_->send(boilerResponse.value())) {
+            OpenThermFrame responseToSend = boilerResponse.value();
+
+            // If we capped the TSet, we want to spoof the response to the thermostat
+            // so it thinks the boiler accepted the requested high temperature.
+            if (config_.mode == ManagerMode::Proxy &&
+                thermostatRequest.value().dataId() == OT_FRAME_TSET &&
+                boilerResponse.value().messageType() == OpenThermMessageType::WriteAck) {
+                
+                responseToSend = OpenThermFrame::buildResponse(
+                    OpenThermMessageType::WriteAck,
+                    OT_FRAME_TSET,
+                    thermostatRequest.value().dataValue()
+                );
+            }
+
+            logMessage("RESPONSE", MessageSource::ThermostatBoiler, responseToSend);
+
+            if (thermostat_->send(responseToSend)) {
                 ESP_LOGI(TAG, "Response queued to be sent to thermostat");
                 validFrames++;
             } else {
@@ -658,6 +697,14 @@ ManagerStatus BoilerManager::status() const {
 
 void BoilerManager::setMode(ManagerMode mode) {
     impl_->setMode(mode);
+}
+
+void BoilerManager::setMaxSetpoint(float maxTemp) {
+    impl_->setMaxSetpoint(maxTemp);
+}
+
+float BoilerManager::getMaxSetpoint() const {
+    return impl_->getMaxSetpoint();
 }
 
 esp_err_t BoilerManager::writeData(uint8_t dataId, uint16_t dataValue,
